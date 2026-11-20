@@ -4,6 +4,8 @@ import { and, desc, eq, gte, isNull, ne, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { paramsHash } from "./hash.js";
 
+export const QUOTE_FRESH_MS = 30_000;
+
 export type { IntentStatus } from "@arcie/db";
 export type Intent = typeof intents.$inferSelect;
 /** Older stored cards lack a revision; redisplay them with their durable version before asking for a tap. */
@@ -135,7 +137,8 @@ export class IntentRepo {
     const res = await this.db
       .update(intents)
       .set({ ...patch, ...revisionBump(patch), status: "executing", updatedAt: new Date().toISOString() })
-      .where(this.fence(id, expected))
+      .where(and(this.fence(id, expected), sql`(${intents.kind} <> 'swap' or ${intents.quoteAt} is null
+        or ${intents.quoteAt}::timestamptz >= clock_timestamp() - ${QUOTE_FRESH_MS} * interval '1 millisecond')`))
       .returning({ id: intents.id });
     return res.length === 1;
   }

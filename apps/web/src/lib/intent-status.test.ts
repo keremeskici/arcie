@@ -28,3 +28,18 @@ it("stops an outstanding read on teardown without applying its late result", asy
   expect(read.mock.calls[0]?.[0].aborted).toBe(true);
   expect(observed).not.toHaveBeenCalled();
 });
+
+it("stops reading an elapsed idle card and keeps reading an executing intent past card expiry", async () => {
+  vi.useFakeTimers();
+  try {
+    const expired = { expiresAt: new Date(Date.now() - 1000).toISOString() };
+    const idle = vi.fn().mockResolvedValue({ ...expired, status: "awaiting_confirmation" });
+    const active = vi.fn().mockResolvedValueOnce({ ...expired, status: "executing" }).mockResolvedValue({ status: "succeeded" });
+    const stopIdle = watchIntent(idle, vi.fn());
+    const stopActive = watchIntent(active, vi.fn());
+    await vi.advanceTimersByTimeAsync(15_000);
+    stopIdle(); stopActive();
+    expect(idle).toHaveBeenCalledTimes(1);
+    expect(active).toHaveBeenCalledTimes(2);
+  } finally { vi.useRealTimers(); }
+});

@@ -232,3 +232,17 @@ it.each(["claim", "card"])("checks the %s expiry after a budget lock wait", asyn
   expect(await out).toMatchObject({ code: kind === "claim" ? "POLICY_DENIED" : "QUOTE_EXPIRED" });
   expect(sends(s.a.kit)).toHaveLength(0);
 });
+
+it("refuses a swap whose quote becomes stale while confirmation waits for the budget", async () => {
+  const s = await setup();
+  const p = await s.a.h.propose(s.ctx("s1"), "swap", { tokenIn: "USDC", tokenOut: "EURC", amountIn: "2" });
+  const id = (p.island as { intentId: string }).intentId;
+  const lock = await holdBudgetLock(s.dbB);
+  const result = s.a.h.confirm(s.ctx("s1"), id, "screen");
+  await waitForBlocked(s.dbB, "%users%for no key update%", 1);
+  await s.dbB.update(intents).set({ quoteAt: new Date(Date.now() - 31_000).toISOString() }).where(eq(intents.id, id));
+  lock.release();
+  await lock.done;
+  expect((await result).status).toBe("awaiting_confirmation");
+  expect(s.a.kit.calls).toHaveLength(0);
+});

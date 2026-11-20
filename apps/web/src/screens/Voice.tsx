@@ -11,9 +11,10 @@ type Line = { role: "user" | "agent"; text: string };
  * Full-screen voice portal. ElevenLabs does speech; our server is its custom LLM and only ever proposes.
  * Confirm cards from the agent appear in the ActionSheet on top of this screen.
  */
-export function VoiceScreen({ agentId, sessionId, onClose }: { agentId: string | null; sessionId: string; onClose: () => void }) {
+export function VoiceScreen({ agentId, sessionId, sessionError, onClose }: { agentId: string | null; sessionId: string | null; sessionError?: string; onClose: () => void }) {
   const [lines, setLines] = React.useState<Line[]>([]);
-  const [error, setError] = React.useState<string | null>(agentId ? null : "Voice isn't set up on the server (ELEVENLABS_AGENT_ID).");
+  const [connectionError, setError] = React.useState<string | null>(agentId ? null : "Voice isn't set up on the server (ELEVENLABS_AGENT_ID).");
+  const error = sessionError ?? connectionError;
   const { steps: latestSteps } = useIslands();
   // Only show the trace for runs that started after this screen opened.
   const [staleRunId] = React.useState(() => latestSteps?.runId ?? null);
@@ -27,18 +28,22 @@ export function VoiceScreen({ agentId, sessionId, onClose }: { agentId: string |
 
   // Start once on open; end when the screen closes.
   React.useEffect(() => {
-    if (!agentId) return;
+    if (!agentId || !sessionId) return;
     let cancelled = false;
+    let started = false;
     navigator.mediaDevices
       .getUserMedia({ audio: true })
-      .then((stream) => {
+      .then(async (stream) => {
         stream.getTracks().forEach((t) => t.stop()); // the SDK opens its own stream
-        if (!cancelled) startSession({ agentId, connectionType: "webrtc", customLlmExtraBody: { session_id: sessionId } });
+        if (cancelled) return;
+        started = true;
+        await startSession({ agentId, connectionType: "webrtc", customLlmExtraBody: { session_id: sessionId } });
+        if (cancelled) endSession();
       })
-      .catch(() => setError("Arcie needs microphone access to listen."));
+      .catch(() => { if (!cancelled) setError(started ? "Couldn’t connect to voice." : "Arcie needs microphone access to listen."); });
     return () => {
       cancelled = true;
-      endSession();
+      if (started) endSession();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, sessionId]);

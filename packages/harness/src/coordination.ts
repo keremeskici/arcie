@@ -3,7 +3,7 @@ import { confirmClaims, intents, sessionState, sessions, users, type DbOrTx, typ
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { assertConfirmable } from "./intents/machine.js";
-import { IntentRepo } from "./intents/repo.js";
+import { IntentRepo, QUOTE_FRESH_MS } from "./intents/repo.js";
 import type { HarnessCtx } from "./context.js";
 import type { PolicyProvider } from "./policy/provider.js";
 
@@ -151,7 +151,7 @@ export async function lockConfirmRows(tx: Tx, intentId: string, token: string) {
  * fixed: users row, then the claim row, then the intent row. Returns `false` when the
  * intent is no longer awaiting confirmation. Call inside one short transaction and never over a network call.
  */
-export async function claimExecution(tx: Tx, a: ClaimExecutionArgs): Promise<boolean | "screen_only"> {
+export async function claimExecution(tx: Tx, a: ClaimExecutionArgs): Promise<boolean | "screen_only" | "stale_quote"> {
   await lockUserBudget(tx, a.userId);
   await tx.select({ token: confirmClaims.token }).from(confirmClaims)
     .where(and(eq(confirmClaims.intentId, a.intentId), eq(confirmClaims.token, a.token))).for("update");
@@ -167,7 +167,10 @@ export async function claimExecution(tx: Tx, a: ClaimExecutionArgs): Promise<boo
   a.check(limits, spent);
   // Atomic with the status change: token live and revision unchanged since the claim, or nothing executes.
   if (await repo.executeFenced(a.intentId, { token: a.token, revision: a.revision }, { confirmedVia: a.channel })) return true;
-  const [expiry] = await tx.execute<{ expired: boolean }>(sql`select ${current.expiresAt}::timestamptz <= clock_timestamp() as expired`);
+  const [expiry] = await tx.execute<{ expired: boolean; staleQuote: boolean }>(sql`select
+    ${current.expiresAt}::timestamptz <= clock_timestamp() as expired,
+    ${current.quoteAt}::timestamptz < clock_timestamp() - ${QUOTE_FRESH_MS} * interval '1 millisecond' as "staleQuote"`);
   if (expiry?.expired) throw new ArcieError("QUOTE_EXPIRED");
+  if (current.kind === "swap" && expiry?.staleQuote) return "stale_quote";
   throw new ArcieError("POLICY_DENIED", { spoken: STALE_CONSENT });
 }

@@ -14,6 +14,8 @@ import { watchIntent } from "./intent-status";
 /** What the screen shows right now. The server is the source of truth; this mirrors its island stream. */
 export type IslandState = {
   confirm: ConfirmIsland | null;
+  confirmSession: string | null;
+  choiceSession: string | null;
   receipt: ReceiptIsland | null;
   choice: ChoiceIsland | null;
   steps: StepsIsland | null;
@@ -25,6 +27,8 @@ export type IslandState = {
 
 const initial: IslandState = {
   confirm: null,
+  confirmSession: null,
+  choiceSession: null,
   receipt: null,
   choice: null,
   steps: null,
@@ -33,7 +37,7 @@ const initial: IslandState = {
   balanceTick: 0,
 };
 
-type Action = { type: "island" | "observed"; island: IslandPayload } | { type: "clear"; key: "confirm" | "receipt" | "choice" | "receive" | "onramp" };
+type Action = { type: "island" | "observed"; island: IslandPayload; sessionId?: string } | { type: "clear"; key: "confirm" | "receipt" | "choice" | "receive" | "onramp" };
 
 function reduce(s: IslandState, a: Action): IslandState {
   if (a.type === "clear") return { ...s, [a.key]: null };
@@ -42,7 +46,7 @@ function reduce(s: IslandState, a: Action): IslandState {
   switch (i.kind) {
     case "confirm":
       if (s.receipt?.intentId === i.intentId || (s.confirm?.intentId === i.intentId && (s.confirm.revision ?? -1) >= (i.revision ?? -1))) return s;
-      return { ...s, confirm: i, receipt: null, choice: null };
+      return { ...s, confirm: i, confirmSession: a.sessionId ?? s.confirmSession, receipt: null, choice: null };
     case "receipt":
       if (s.receipt?.intentId === i.intentId) return s;
       return {
@@ -54,7 +58,7 @@ function reduce(s: IslandState, a: Action): IslandState {
     case "dismiss":
       return s.confirm?.intentId === i.intentId ? { ...s, confirm: null } : s;
     case "choice":
-      return { ...s, choice: i };
+      return { ...s, choice: i, choiceSession: a.sessionId ?? s.choiceSession };
     case "steps":
       return { ...s, steps: i };
     case "receive":
@@ -67,7 +71,7 @@ function reduce(s: IslandState, a: Action): IslandState {
 }
 
 type IslandsApi = IslandState & {
-  push: (island: IslandPayload) => void;
+  push: (island: IslandPayload, origin?: string | null) => void;
   clear: (key: "confirm" | "receipt" | "choice" | "receive" | "onramp") => void;
   connected: boolean;
   verifying: string | null;
@@ -87,15 +91,14 @@ export function IslandsProvider({ sessionId, children }: { sessionId: string; ch
     const active = watchers.current.get(id);
     if (active && !replace) return;
     active?.();
-    watchers.current.set(id, watchIntent((signal) => api.get(`/intents/${encodeURIComponent(id)}`, signal), (row) => {
+    watchers.current.set(id, watchIntent((signal) => api.get(`/intents/${encodeURIComponent(id)}`, signal, null), (row) => {
       const pending = row.status === "executing" || row.checking === true;
       setVerifying((old) => pending ? id : old === id ? null : old);
       if (row.island) dispatch({ type: "observed", island: row.island });
       if (row.status !== "executing" && row.status !== "awaiting_confirmation") {
-        watchers.current.delete(id);
         if (!row.island) dispatch({ type: "island", island: { kind: "dismiss", reason: row.status === "expired" ? "expired" : "cancelled", intentId: id } });
       }
-    }));
+    }, () => watchers.current.delete(id)));
   }, []);
   const verify = React.useCallback((id: string) => { setVerifying(id); watch(id, true); }, [watch]);
   React.useEffect(() => {
@@ -106,15 +109,17 @@ export function IslandsProvider({ sessionId, children }: { sessionId: string; ch
     const es = new EventSource(`/events?sessionId=${encodeURIComponent(sessionId)}`);
     const controller = new AbortController();
     es.onopen = () => {
+      if (controller.signal.aborted) return;
       setConnected(true);
-      void api.get<{ executing: string[] }>("/activity?executing=1", controller.signal).then(({ executing }) => {
+      void api.get<{ executing: string[] }>("/activity?executing=1", controller.signal, null).then(({ executing }) => {
         if (!controller.signal.aborted) for (const id of executing) watch(id);
       }).catch(() => {});
     };
-    es.onerror = () => setConnected(false); // EventSource reconnects on its own
+    es.onerror = () => { if (!controller.signal.aborted) setConnected(false); }; // EventSource reconnects on its own
     es.addEventListener("island", (e) => {
+      if (controller.signal.aborted) return;
       try {
-        dispatch({ type: "island", island: JSON.parse((e as MessageEvent<string>).data) as IslandPayload });
+        dispatch({ type: "island", sessionId, island: JSON.parse((e as MessageEvent<string>).data) as IslandPayload });
       } catch {
         /* ignore malformed frames */
       }
@@ -122,12 +127,14 @@ export function IslandsProvider({ sessionId, children }: { sessionId: string; ch
     return () => {
       controller.abort();
       es.close();
-      for (const stop of watchers.current.values()) stop();
-      watchers.current.clear();
     };
   }, [sessionId, watch]);
 
-  const push = React.useCallback((island: IslandPayload) => dispatch({ type: "island", island }), []);
+  React.useEffect(() => () => {
+    for (const stop of watchers.current.values()) stop();
+    watchers.current.clear();
+  }, []);
+  const push = React.useCallback((island: IslandPayload, origin?: string | null) => dispatch({ type: "island", sessionId: origin ?? sessionId, island }), [sessionId]);
   const clear = React.useCallback((key: Parameters<IslandsApi["clear"]>[0]) => dispatch({ type: "clear", key }), []);
   const value = React.useMemo(() => ({ ...state, push, clear, connected, verifying, verify }), [state, push, clear, connected, verifying, verify]);
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

@@ -16,15 +16,15 @@ export function setSessionId(id: string | null) {
   sessionId = id;
 }
 
-async function request<T>(method: "GET" | "POST", path: string, body?: unknown, retried = false, signal?: AbortSignal): Promise<T> {
+async function request<T>(method: "GET" | "POST", path: string, body?: unknown, retried = false, signal?: AbortSignal, scope = sessionId): Promise<T> {
   const headers: Record<string, string> = {};
   const token = await getToken();
   if (token) headers.authorization = `Bearer ${token}`;
-  if (sessionId) headers["x-arcie-session"] = sessionId;
+  if (scope) headers["x-arcie-session"] = scope;
   if (body !== undefined) headers["content-type"] = "application/json";
   const res = await fetch(path, { method, headers, signal, body: body === undefined ? undefined : JSON.stringify(body) });
   const json = (await res.json().catch(() => ({}))) as { error?: { code?: string; message?: string } };
-  if (res.status === 401 && !retried) return request(method, path, body, true, signal); // token refreshed by getToken()
+  if (res.status === 401 && !retried) return request(method, path, body, true, signal, scope); // token refreshed by getToken()
   if (!res.ok || json.error) {
     throw new ApiError(json.error?.code ?? "UNKNOWN", json.error?.message ?? "Something went wrong.", res.status);
   }
@@ -32,8 +32,8 @@ async function request<T>(method: "GET" | "POST", path: string, body?: unknown, 
 }
 
 export const api = {
-  get: <T>(path: string, signal?: AbortSignal) => request<T>("GET", path, undefined, false, signal),
-  post: <T>(path: string, body: unknown = {}) => request<T>("POST", path, body),
+  get: <T>(path: string, signal?: AbortSignal, scope?: string | null) => request<T>("GET", path, undefined, false, signal, scope),
+  post: <T>(path: string, body: unknown = {}, scope?: string | null, signal?: AbortSignal) => request<T>("POST", path, body, false, signal, scope),
 };
 
 export type ServerConfig = {

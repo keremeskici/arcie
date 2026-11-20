@@ -4,10 +4,11 @@ export interface IntentStatusView {
   status: string;
   island?: IslandPayload | null;
   checking?: boolean;
+  expiresAt?: string | null;
 }
 
 /** One authenticated read at a time. The interval backs off to ten seconds during long settlements. */
-export function watchIntent(read: (signal: AbortSignal) => Promise<IntentStatusView>, observe: (row: IntentStatusView) => void) {
+export function watchIntent(read: (signal: AbortSignal) => Promise<IntentStatusView>, observe: (row: IntentStatusView) => void, finished?: () => void) {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout>;
   let delay = 1000;
@@ -16,7 +17,11 @@ export function watchIntent(read: (signal: AbortSignal) => Promise<IntentStatusV
       const row = await read(AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]));
       if (controller.signal.aborted) return;
       observe(row);
-      if (row.status !== "executing" && row.status !== "awaiting_confirmation") return;
+      const idleExpired = row.status === "awaiting_confirmation" && !row.checking && row.expiresAt && Date.parse(row.expiresAt) <= Date.now();
+      if (idleExpired || (row.status !== "executing" && row.status !== "awaiting_confirmation")) {
+        finished?.();
+        return;
+      }
     } catch {
       // Transport failures leave the outcome unknown. Retry only the status read.
     }

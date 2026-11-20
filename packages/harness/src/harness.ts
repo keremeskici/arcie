@@ -12,7 +12,7 @@ import { buildReceipt, nextStepFor } from "./disclosure/receipt.js";
 import { StepTracker, type EventLog } from "./events.js";
 import { paramsHash } from "./intents/hash.js";
 import { assertConfirmable } from "./intents/machine.js";
-import { IntentRepo, savedCard, type Intent, type IntentStatus } from "./intents/repo.js";
+import { IntentRepo, QUOTE_FRESH_MS, savedCard, type Intent, type IntentStatus } from "./intents/repo.js";
 import type { PolicyProvider } from "./policy/provider.js";
 import { checkLimits } from "./policy/check.js";
 import { balancesOf, countWord, joinNames, walletFor, type Svc } from "./services.js";
@@ -23,7 +23,6 @@ import { readTools } from "./tools/read.js";
 import type { ToolDef, ToolResult } from "./tools/registry.js";
 
 const TTL_SEC = 120;
-const QUOTE_FRESH_MS = 30_000;
 type Claim = { token: string; revision: number };
 const STALE_CONSENT = "The details changed. Please check the new card and confirm again.";
 const SCREEN_ONLY = "Tap confirm on the card to finish.";
@@ -145,7 +144,7 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
         const created = await txRepo.create({ ...base, id, params: { ...prep.params, requireScreen: prep.requireScreen }, preview: prep.preview, status: "awaiting_confirmation" });
         const island = { ...prep.buildIsland(created.id, created.expiresAt!), revision: created.revision + 1 };
         const previewTurn = await guardSession(tx, ctx);
-        await txRepo.patch(created.id, { previewTurn, preview: { ...prep.preview, island, estimated: prep.estimated } });
+        await txRepo.patch(created.id, { previewTurn, preview: { ...prep.preview, originalDisclosure: true, island, estimated: prep.estimated } });
         await audit(tx, ctx, "intent.proposed", { kind, params: prep.params, usdValue: prep.usdValue }, created.id);
         // The card and any dismissals commit with the proposal, in the order a stream should show them.
         for (const old of superseded) await dismiss(tx, ctx, old, "superseded");
@@ -246,7 +245,7 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
       throw e;
     }
     if (channel === "screen") {
-      const originalCard = (intent.preview?.island as { revision?: number } | undefined)?.revision === 1 && intent.revision === 1;
+      const originalCard = !ctx.sessionGuard && intent.preview?.originalDisclosure === true && intent.revision === 1;
       if (displayedRevision === undefined ? !originalCard : displayedRevision !== intent.revision || displayedRevision !== claim.revision) {
         const island = savedCard(intent);
         return { status: "awaiting_confirmation", summary: STALE_CONSENT, ...(island ? { island } : {}) };
@@ -280,6 +279,10 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
         if (denied) throw new ArcieError(denied.code, { spoken: denied.reason });
       },
     }));
+    if (claimed === "stale_quote") {
+      const current = await storedResult(intent.id);
+      return { ...current, summary: "The quote aged while I was checking. Please confirm again to refresh it." };
+    }
     if (claimed === "screen_only") return { status: "awaiting_confirmation", summary: SCREEN_ONLY };
     if (!claimed) return storedResult(intent.id);
     await audit(db, ctx, "intent.confirmed", { channel }, intent.id);

@@ -105,5 +105,5 @@ Onramp sandbox: open **Add Money → Open checkout**, or say **“I want to depo
 ## Status
 
 - **Arc Testnet:** the original backend smoke run passed 15/15, evals passed 22/22, and the backend review covered 206 passing tests. Balance, send, and a voice confirmation were verified with a real Arc transaction.
-- **Vercel and Supabase branch:** 410 tests across 39 suites and both typechecks pass. See the [deployment runbook](docs/deployment.md) for hosted verification and cutover, and [NEXT.md](.claude/NEXT.md) for project history.
+- **Vercel and Supabase branch:** 417 tests across 40 suites and both typechecks pass. See the [deployment runbook](docs/deployment.md) for hosted verification and cutover, and [NEXT.md](.claude/NEXT.md) for project history.
 - **Possible later feature:** ENS text-record agent limits.

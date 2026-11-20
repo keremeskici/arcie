@@ -181,6 +181,7 @@ export function createCircleAppKit(cfg: CircleAppKitConfig): AppKitPort {
     waitForSwap: (w, txHash, timeoutMs) =>
       guard(async () => {
         const st = await kit.waitForSwap({ txHash, chainIn: w.chain, timeoutMs, ...apiKey } as never);
+        if (st.source?.txHash != null && st.source.txHash.toLowerCase() !== txHash.toLowerCase()) return txResult(w.chain, txHash, undefined, "PENDING");
         const out = txResult(w.chain, txHash, undefined, swapStatus(st.progress?.status));
         if (st.destination?.amount) out.amountOut = st.destination.amount;
         return out;

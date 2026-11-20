@@ -79,3 +79,21 @@ it("redisplays an imported legacy disclosure with a usable revision before accep
   expect(kit.calls).toHaveLength(0);
   expect((await (await call("POST", path, { revision: first.island.revision })).json()).status).toBe("succeeded");
 });
+
+it.each(["dev", "privy"] as const)("requires the new revision after the first requote of a revision-zero import in %s", async (authMode) => {
+  const { db, call, kit } = await testApp({ authMode });
+  const { intents } = await import("@arcie/db");
+  const { eq } = await import("drizzle-orm");
+  const headers = { authorization: "Bearer tok-demo" };
+  const { island } = await (await call("POST", "/intents", { kind: "swap", params: { tokenIn: "USDC", tokenOut: "EURC", amountIn: "4" } }, headers)).json();
+  const { revision: _, ...legacy } = island;
+  const { id, preview } = (await db.select().from(intents))[0]!;
+  await db.update(intents).set({ revision: 0, preview: { estimatedOut: preview?.estimatedOut, island: legacy }, quoteAt: new Date(Date.now()-35_000).toISOString() }).where(eq(intents.id, id));
+  kit.setSwapRate("USDC", "EURC", 0.6);
+  const path = `/intents/${id}/confirm`;
+  const refreshed = await (await call("POST", path, { revision: 0 }, headers)).json();
+  expect(refreshed).toMatchObject({ status: "awaiting_confirmation", island: { revision: 1 } });
+  expect((await (await call("POST", path, {}, headers)).json()).status).toBe("awaiting_confirmation");
+  expect(kit.calls).toHaveLength(0);
+  expect((await (await call("POST", path, { revision: 1 }, headers)).json()).status).toBe("succeeded");
+});

@@ -57,3 +57,11 @@ it("keeps swap settlement unknown when Circle has no record of the submitted has
   sdk.waitForSwap.mockResolvedValue({ progress: { status: "NOT_FOUND" } });
   expect((await kit.waitForSwap(w, "0x123", 10)).status).toBe("PENDING");
 });
+
+it("accepts only a matching reported swap source hash, ignoring case", async () => {
+  const kit = createCircleAppKit({ circleApiKey: "TEST_API_KEY:fixture:fixture", entitySecret: "e".repeat(64), onrampApiKey: "test" });
+  sdk.waitForSwap.mockResolvedValue({ source: { txHash: "0xdef" }, progress: { status: "DONE" }, destination: { amount: "99" } });
+  expect(await kit.waitForSwap(w, "0xabc", 10)).toMatchObject({ status: "PENDING" });
+  sdk.waitForSwap.mockResolvedValue({ source: { txHash: "0xABC" }, progress: { status: "DONE" } });
+  expect((await kit.waitForSwap(w, "0xabc", 10)).status).toBe("DONE");
+});

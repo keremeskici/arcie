@@ -5,7 +5,7 @@ _Last updated 2026-11-20: Deployment target is Vercel + Supabase._
 ## State
 - **Repo:** https://github.com/keremeskici/arcie (default branch `main`). Branch off `main` for new work; push and merge only with the user's OK.
 - **Backend history:** Tasks 1–22 covered the backend and harness, the OpenAI agent endpoint, REST + SSE, onramp, the reconciler, and Privy login. The shared checkout previously passed 273 tests, including concurrent onramp-sandbox and dev-UI work.
-- **Vercel and Supabase branch:** 410 tests across 39 suites and both typechecks pass (`pnpm test && pnpm typecheck`). See the [migration review record](../docs/vercel-supabase-review.md) for release evidence.
+- **Vercel and Supabase branch:** 417 tests across 40 suites and both typechecks pass (`pnpm test && pnpm typecheck`). See the [migration review record](../docs/vercel-supabase-review.md) for release evidence.
 - **Live on Arc Testnet:** Circle wallets; send, swap, earn and onramp (smoke test 15/15); evals 22/22; a real agent send+confirm.
 - **Progress ledger** (every decision and its reasoning): `.superpowers/sdd/2026-11-06-arcie-backend/progress.md`. It's git-ignored, so it exists only in this checkout. Read it before changing anything.
 - **Final backend review done:** fresh reviewer, 17 findings fixed in one test-first pass; no deferred minors. See `docs/backend-review.md`. Concurrent UI work is outside that reviewed range and needs its own release review.

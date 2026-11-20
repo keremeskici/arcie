@@ -90,9 +90,9 @@ function useCountdown(expiresAt: string) {
   return { left, label: `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` };
 }
 
-function ConfirmCard({ island, onResult, voice }: { island: ConfirmIsland; onResult: (i: IslandPayload) => void; voice: VoiceBridge }) {
+function ConfirmCard({ island, onResult, voice }: { island: ConfirmIsland; onResult: (i: IslandPayload, origin?: string | null) => void; voice: VoiceBridge }) {
   const [busy, setBusy] = React.useState<"confirm" | "cancel" | null>(null);
-  const { verify, verifying } = useIslands();
+  const { verify, verifying, confirmSession } = useIslands();
   const [error, setError] = React.useState<string | null>(null);
   const { left, label } = useCountdown(island.expiresAt);
   const expired = left === 0;
@@ -101,11 +101,11 @@ function ConfirmCard({ island, onResult, voice }: { island: ConfirmIsland; onRes
     setBusy(kind);
     setError(null);
     try {
-      const r = await api.post<{ island?: IslandPayload; summary?: string; status?: string }>(`/intents/${island.intentId}/${kind}`, kind === "confirm" ? { channel: "screen", revision: island.revision } : {});
+      const r = await api.post<{ island?: IslandPayload; summary?: string; status?: string }>(`/intents/${island.intentId}/${kind}`, kind === "confirm" ? { channel: "screen", revision: island.revision } : {}, confirmSession);
       if (kind === "cancel" || r.status === "succeeded" || r.status === "executing") voice.tell(r.summary ?? "The action was updated.");
       if (kind === "confirm" && (!r.island || r.status === "executing")) verify(island.intentId);
       setBusy(null);
-      if (r.island) onResult(r.island);
+      if (r.island) onResult(r.island, confirmSession);
       else if (kind === "cancel") onResult({ kind: "dismiss", intentId: island.intentId, reason: "cancelled" });
     } catch (e) {
       if (kind === "confirm") verify(island.intentId);
@@ -253,11 +253,12 @@ function ReceiptCard({ island, onDone, voice }: { island: ReceiptIsland; onDone:
 }
 
 function ChoiceCard({ island, onAnswered, voice }: { island: ChoiceIsland; onAnswered: () => void; voice: VoiceBridge }) {
+  const { choiceSession } = useIslands();
   const [busy, setBusy] = React.useState<string | null>(null);
   async function pick(optionId: string, label: string) {
     setBusy(optionId);
     try {
-      await api.post(`/choices/${island.choiceId}`, { optionId });
+      await api.post(`/choices/${island.choiceId}`, { optionId }, choiceSession);
       voice.tell(`The user picked "${label}" on screen for: ${island.question}`);
       onAnswered();
     } finally {
