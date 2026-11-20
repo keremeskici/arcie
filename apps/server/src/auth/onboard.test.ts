@@ -1,6 +1,6 @@
 import type { WalletCreator } from "@arcie/appkit";
 import { DEFAULT_LIMITS } from "@arcie/core";
-import { audit, createDb, limits, users, wallets } from "@arcie/db";
+import { audit, createDb, limits, users, walletProvisioning, wallets } from "@arcie/db";
 import { eq, sql } from "drizzle-orm";
 import { createTestDb } from "@arcie/db/testing";
 import { describe, expect, it } from "vitest";
@@ -82,15 +82,22 @@ describe("onboard", () => {
     const { db, url } = await createTestDb();
     const second = createDb(url, { max: 3 });
     const { circle, keys } = fakeCircle();
-    const [a, b] = await Promise.all([
-      onboard({ db, circle, walletSetId: "ws" }, KEREM),
-      onboard({ db: second.db, circle, walletSetId: "ws" }, KEREM),
-    ]);
-    expect(a.wallet.address).toBe(b.wallet.address);
-    expect(await db.select().from(wallets)).toHaveLength(1);
-    expect(keys.length).toBeGreaterThanOrEqual(1);
-    expect(new Set(keys).size).toBe(1);
-    await second.close();
+    try {
+      const [a, b] = await Promise.all([
+        onboard({ db, circle, walletSetId: "ws" }, KEREM),
+        onboard({ db: second.db, circle, walletSetId: "ws" }, KEREM),
+      ]);
+      expect(a.wallet.address).toBe(b.wallet.address);
+      expect(await db.select().from(wallets)).toHaveLength(1);
+      const [stored] = await db.select().from(walletProvisioning);
+      expect(keys.length).toBeGreaterThanOrEqual(1);
+      for (const k of keys) {
+        expect(k).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+        expect(k).toBe(stored!.idempotencyKey);
+      }
+    } finally {
+      await second.close();
+    }
   });
 
   it("drips only once when two logins race", async () => {

@@ -1,6 +1,6 @@
 import { ArcieError, type ChainId } from "@arcie/core";
 import { randomUUID } from "node:crypto";
-import { walletProvisioning, wallets, type DbOrTx } from "@arcie/db";
+import { audit, walletProvisioning, wallets, type DbOrTx } from "@arcie/db";
 import { and, eq, sql } from "drizzle-orm";
 import { getChain, type ChainConfig } from "./chains.js";
 import type { WalletRef } from "./port.js";
@@ -69,11 +69,29 @@ export async function ensureWallet(
     throw e;
   }
 
-  await db.insert(wallets)
-    .values({ id: created.id, userId: opts.userId, chain: opts.chain, circleWalletId: created.id, address: created.address as `0x${string}`, accountType: opts.accountType })
-    .onConflictDoNothing(); // any unique conflict (id or user+chain) means another caller stored this wallet
-  await setStatus("created");
+  let insertError: unknown;
+  try {
+    await db.insert(wallets)
+      .values({ id: created.id, userId: opts.userId, chain: opts.chain, circleWalletId: created.id, address: created.address as `0x${string}`, accountType: opts.accountType })
+      .onConflictDoNothing({ target: [wallets.userId, wallets.chain] });
+  } catch (e) {
+    insertError = e; // a racer may have stored the same Circle wallet first (PK conflict): judged by the re-read below
+  }
   const stored = await getWallet(db, opts.userId, opts.chain);
-  if (!stored) throw new ArcieError("CIRCLE_API_ERROR", { detail: { provisioning: "wallet row missing" } });
+  if (!stored) {
+    await setStatus("uncertain");
+    throw insertError ?? new ArcieError("CIRCLE_API_ERROR", { detail: { provisioning: "wallet row missing" } });
+  }
+  if (stored.circleWalletId !== created.id) {
+    // Circle did not replay our key: a second wallet may be orphaned. Keep it for reconciliation.
+    await setStatus("uncertain");
+    await db.insert(audit).values({
+      userId: opts.userId,
+      type: "wallet_provisioning.mismatch",
+      payload: { chain: opts.chain, stored: stored.circleWalletId, returned: created.id, idempotencyKey: prov.idempotencyKey },
+    });
+    return stored;
+  }
+  await setStatus("created");
   return stored;
 }

@@ -1,5 +1,6 @@
-import { seed, wallets, walletProvisioning } from "@arcie/db";
+import { audit, seed, wallets, walletProvisioning } from "@arcie/db";
 import { createDb } from "@arcie/db";
+import { eq } from "drizzle-orm";
 import { createTestDb } from "@arcie/db/testing";
 import { describe, expect, it } from "vitest";
 import { ensureWallet, type WalletCreator } from "./wallets.js";
@@ -53,6 +54,8 @@ describe("ensureWallet", () => {
   });
 });
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 describe("wallet provisioning persistence", () => {
   const opts = { userId: "demo", chain: "Arc_Testnet" as const, walletSetId: "ws-1", accountType: "EOA" as const };
 
@@ -105,10 +108,49 @@ describe("wallet provisioning persistence", () => {
         return { data: { wallets: [byKey.get(input.idempotencyKey)!] } };
       },
     };
-    const [a, b] = await Promise.all([ensureWallet(db, creator, opts), ensureWallet(db2, creator, opts)]);
-    expect(a).toEqual(b);
-    expect(new Set(keys).size).toBe(1);
+    try {
+      const [a, b] = await Promise.all([ensureWallet(db, creator, opts), ensureWallet(db2, creator, opts)]);
+      expect(a).toEqual(b);
+      const [stored] = await db.select().from(walletProvisioning);
+      expect(keys.length).toBeGreaterThanOrEqual(1);
+      for (const k of keys) {
+        expect(k).toMatch(UUID);
+        expect(k).toBe(stored!.idempotencyKey);
+      }
+      expect(await db.select().from(wallets)).toHaveLength(1);
+    } finally {
+      await second.close();
+    }
+  });
+
+  it("uses the key another instance already stored (pending row, no in-process state)", async () => {
+    const { db } = await createTestDb();
+    await seed(db, { userId: "demo" });
+    const K = "6f1c2a0e-3b4d-4e5f-8a9b-0c1d2e3f4a5b";
+    await db.insert(walletProvisioning).values({ userId: "demo", chain: "Arc_Testnet", idempotencyKey: K, status: "pending" });
+    const { creator, calls } = fakeCreator();
+    await ensureWallet(db, creator, opts);
+    expect(calls).toHaveLength(1);
+    expect((calls[0] as { idempotencyKey: string }).idempotencyKey).toBe(K);
     expect(await db.select().from(wallets)).toHaveLength(1);
-    await second.close();
+  });
+
+  it("marks uncertain and audits when Circle returns a different wallet than the stored mapping", async () => {
+    const { db } = await createTestDb();
+    await seed(db, { userId: "demo" });
+    const creator: WalletCreator = {
+      async createWallets() {
+        // Another instance stored its wallet meanwhile; Circle did not replay and returns a new one.
+        await db.insert(wallets).values({ id: "cw-first", userId: "demo", chain: "Arc_Testnet", circleWalletId: "cw-first", address: "0x00000000000000000000000000000000000000f1", accountType: "EOA" });
+        return { data: { wallets: [{ id: "cw-second", address: "0x00000000000000000000000000000000000000f2" }] } };
+      },
+    };
+    const ref = await ensureWallet(db, creator, opts);
+    expect(ref.circleWalletId).toBe("cw-first");
+    const [prov] = await db.select().from(walletProvisioning);
+    expect(prov!.status).toBe("uncertain");
+    const rows = await db.select().from(audit).where(eq(audit.type, "wallet_provisioning.mismatch"));
+    expect(rows).toHaveLength(1);
+    expect(await db.select().from(wallets)).toHaveLength(1);
   });
 });
