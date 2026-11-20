@@ -1,4 +1,5 @@
 export * from "./context.js";
+export { lockUserBudget } from "./coordination.js";
 export * from "./events.js";
 export * from "./harness.js";
 export * from "./intents/repo.js";

@@ -1,5 +1,5 @@
 import { ArcieError, type AgentLimits } from "@arcie/core";
-import { limits, type Db } from "@arcie/db";
+import { limits, type Db, type DbOrTx } from "@arcie/db";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import type { PolicyProvider } from "./provider.js";
@@ -19,8 +19,8 @@ export const agentLimitsSchema = z.object({
 export class DbPolicyProvider implements PolicyProvider {
   constructor(private readonly db: Db) {}
 
-  async getLimits(userId: string) {
-    const row = (await this.db.select().from(limits).where(eq(limits.userId, userId)).limit(1))[0];
+  async getLimits(userId: string, tx?: DbOrTx) {
+    const row = (await (tx ?? this.db).select().from(limits).where(eq(limits.userId, userId)).limit(1))[0];
     if (!row) throw new ArcieError("NOT_FOUND", { detail: { limitsFor: userId } });
     return { ...agentLimitsSchema.parse(row.json), source: "db" as const };
   }

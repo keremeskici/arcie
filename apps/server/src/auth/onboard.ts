@@ -2,6 +2,7 @@ import { ensureWallet, HOME_CHAIN, type WalletCreator, type WalletRef } from "@a
 import { DEFAULT_LIMITS, type AgentLimits } from "@arcie/core";
 import { limits, users, type Db } from "@arcie/db";
 import { and, eq, isNull } from "drizzle-orm";
+import { lockUserBudget } from "@arcie/harness";
 import type { Identity } from "./verifier.js";
 
 export interface OnboardDeps {
@@ -20,13 +21,18 @@ export async function onboard(
   id: Identity,
 ): Promise<{ user: User; wallet: WalletRef; limits: AgentLimits; dripTx: string | null }> {
   const { db } = deps;
-  await db.insert(users)
-    .values({ id: id.userId, displayName: id.displayName, homeChain: HOME_CHAIN, email: id.email ?? null, linkedWallet: id.linkedWallet ?? null })
-    .onConflictDoUpdate({
-      target: users.id,
-      set: { displayName: id.displayName, ...(id.email ? { email: id.email } : {}), ...(id.linkedWallet ? { linkedWallet: id.linkedWallet } : {}) },
-    });
-  await db.insert(limits).values({ userId: id.userId, json: DEFAULT_LIMITS }).onConflictDoNothing();
+  // The user row must exist to be locked. Every limits writer takes this same per-user budget lock first, so
+  // it serializes with execution claims (which read limits and spend under it).
+  await db.transaction(async (tx) => {
+    await tx.insert(users)
+      .values({ id: id.userId, displayName: id.displayName, homeChain: HOME_CHAIN, email: id.email ?? null, linkedWallet: id.linkedWallet ?? null })
+      .onConflictDoNothing();
+    await lockUserBudget(tx, id.userId);
+    await tx.update(users)
+      .set({ displayName: id.displayName, ...(id.email ? { email: id.email } : {}), ...(id.linkedWallet ? { linkedWallet: id.linkedWallet } : {}) })
+      .where(eq(users.id, id.userId));
+    await tx.insert(limits).values({ userId: id.userId, json: DEFAULT_LIMITS }).onConflictDoNothing();
+  });
 
   const wallet = await ensureWallet(db, deps.circle, { userId: id.userId, chain: HOME_CHAIN, walletSetId: deps.walletSetId, accountType: "EOA" });
 

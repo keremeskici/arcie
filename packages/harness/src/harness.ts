@@ -1,13 +1,13 @@
 import type { AppKitPort } from "@arcie/appkit";
 import { ArcieError, type ActionKind, type Channel, type IslandPayload, type TokenSymbol, tokenName } from "@arcie/core";
-import { choices, confirmClaims, type Db } from "@arcie/db";
-import { and, eq } from "drizzle-orm";
+import { choices, type Db } from "@arcie/db";
+import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { parseUnits } from "viem";
 import { ACTIONS, swapIsland } from "./actions.js";
 import { audit } from "./audit.js";
 import type { HarnessCtx } from "./context.js";
-import { beginProposal, cancelUnderLock, claimConfirmation, finishProposal, publishProposal, releaseConfirmation } from "./coordination.js";
+import { beginProposal, cancelUnderLock, claimConfirmation, claimExecution, finishProposal, publishProposal, releaseConfirmation } from "./coordination.js";
 import { buildReceipt, nextStepFor } from "./disclosure/receipt.js";
 import { EventBus, StepTracker } from "./events.js";
 import { paramsHash } from "./intents/hash.js";
@@ -193,34 +193,26 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
     const requoted = await refreshIfStale(ctx, intent, claim);
     if (requoted) return requoted;
 
-    const currentLimits = await svc.policy.getLimits(ctx.userId);
-    // Usage and execution claim share one transaction. Executing
+    // The budget lock, fresh limits, usage and execution claim share one transaction. Executing
     // intents reserve their budget even when settlement is still unknown.
-    const claimed = await db.transaction(async (tx) => {
-      const txRepo = new IntentRepo(tx);
-      assertActive(ctx);
-      const current = await txRepo.get(intent.id);
-      if (current?.status !== "awaiting_confirmation") return false;
-      // Lock our claim row: a takeover can't commit while we decide, and the fenced transition below rechecks it.
-      await tx.select({ token: confirmClaims.token }).from(confirmClaims)
-        .where(and(eq(confirmClaims.intentId, intent.id), eq(confirmClaims.token, claim.token))).for("update");
-      assertConfirmable(current, { channel, userTurn: ctx.userTurn, now: ctx.now() });
-      if (current.paramsHash !== intent.paramsHash) throw new ArcieError("POLICY_DENIED", { spoken: STALE_CONSENT });
-      const denied = checkLimits({
-        action: intent.kind,
-        token: (intent.params.tokenIn ?? intent.params.token) as TokenSymbol,
-        ...(intent.kind === "swap" ? { tokenOut: intent.params.tokenOut as TokenSymbol } : {}),
-        usdValue: intent.kind === "earn_withdraw" ? 0 : Number(intent.usdValue),
-        limits: currentLimits,
-        spentTodayUsd: await txRepo.spentTodayUsd(ctx.userId, ctx.now()),
-        ...(typeof intent.params.slippageBps === "number" ? { slippageBps: intent.params.slippageBps } : {}),
-      });
-      if (denied) throw new ArcieError(denied.code, { spoken: denied.reason });
-      // Atomic with the status change: token live and revision unchanged since the claim, or nothing executes.
-      if (await txRepo.executeFenced(intent.id, claim, { confirmedVia: channel })) return true;
-      if ((await txRepo.get(intent.id))?.status !== "awaiting_confirmation") return false;
-      throw new ArcieError("POLICY_DENIED", { spoken: STALE_CONSENT });
-    });
+    assertActive(ctx);
+    const claimed = await db.transaction((tx) => claimExecution(tx, {
+      intentId: intent.id, userId: ctx.userId, token: claim.token, revision: claim.revision,
+      paramsHash: intent.paramsHash, channel, userTurn: ctx.userTurn, now: ctx.now(), policy: svc.policy,
+      check: (currentLimits, spentTodayUsd) => {
+        assertActive(ctx);
+        const denied = checkLimits({
+          action: intent.kind,
+          token: (intent.params.tokenIn ?? intent.params.token) as TokenSymbol,
+          ...(intent.kind === "swap" ? { tokenOut: intent.params.tokenOut as TokenSymbol } : {}),
+          usdValue: intent.kind === "earn_withdraw" ? 0 : Number(intent.usdValue),
+          limits: currentLimits,
+          spentTodayUsd,
+          ...(typeof intent.params.slippageBps === "number" ? { slippageBps: intent.params.slippageBps } : {}),
+        });
+        if (denied) throw new ArcieError(denied.code, { spoken: denied.reason });
+      },
+    }));
     if (!claimed) {
       return { status: "executing", summary: "Already on it." };
     }

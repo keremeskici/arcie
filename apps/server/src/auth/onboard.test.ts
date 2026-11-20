@@ -1,6 +1,7 @@
 import type { WalletCreator } from "@arcie/appkit";
 import { DEFAULT_LIMITS } from "@arcie/core";
 import { limits, users, wallets } from "@arcie/db";
+import { eq, sql } from "drizzle-orm";
 import { createTestDb } from "@arcie/db/testing";
 import { describe, expect, it } from "vitest";
 import { onboard } from "./onboard.js";
@@ -66,5 +67,36 @@ describe("onboard", () => {
     const deps = { db, circle: fakeCircle().circle, walletSetId: "ws", drip: async () => (drips++, "0xd") };
     await Promise.all([onboard(deps, KEREM), onboard(deps, KEREM)]);
     expect(drips).toBe(1);
+  });
+
+  it("takes the user's budget lock before writing limits", async () => {
+    const { db } = await createTestDb();
+    const deps = { db, circle: fakeCircle().circle, walletSetId: "ws" };
+    await onboard(deps, KEREM);
+    await db.delete(limits);
+    let release!: () => void;
+    let locked!: () => void;
+    const hold = new Promise<void>((r) => { release = r; });
+    const has = new Promise<void>((r) => { locked = r; });
+    const holder = db.transaction(async (tx) => {
+      await tx.select({ id: users.id }).from(users).where(eq(users.id, KEREM.userId)).for("update");
+      locked();
+      await hold;
+    });
+    await has;
+    const done = onboard(deps, KEREM);
+    let blocked = false;
+    for (let i = 0; i < 250 && !blocked; i++) {
+      const rows = await db.execute<{ n: number }>(sql`
+        select count(*)::int as n from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid() and query ilike '%for update%'`);
+      blocked = rows[0]!.n >= 1;
+      if (!blocked) await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(blocked).toBe(true); // onboard queued on the budget lock, as a limits writer must
+    expect(await db.select().from(limits)).toHaveLength(0);
+    release();
+    await holder;
+    expect((await done).limits).toEqual(DEFAULT_LIMITS);
   });
 });
