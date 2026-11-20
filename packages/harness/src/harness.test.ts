@@ -36,7 +36,7 @@ async function setup(opts: { confirmChannels?: "any" | "screen" } = {}) {
   const advance = (sec: number) => (clock = new Date(clock.getTime() + sec * 1000));
   const allIntents = async () => db.select().from(intents);
   const balance = async (token: string) => (await kit.getBalances(W)).find((b) => b.token === token)?.amount;
-  return { db, kit, islands, h, ctx, advance, allIntents, balance };
+  return { db, kit, events, islands, h, ctx, advance, allIntents, balance };
 }
 
 const confirmIsland = (r: { island?: IslandPayload }) => r.island as ConfirmIsland;
@@ -201,6 +201,24 @@ describe("swaps and earn", () => {
     expect(r.status).toBe("awaiting_confirmation");
     expect(confirmIsland(r).adjustments).toContain("The price moved; here's the updated quote.");
     expect(kit.calls.filter((c) => c.method === "swap")).toHaveLength(0);
+  });
+
+  it("commits a requote with its card or not at all (no ghost card, no card-less revision)", async () => {
+    const { h, ctx, kit, advance, events, allIntents, islands } = await setup();
+    const p = await h.runTool(ctx(), "propose_swap", { tokenIn: "USDC", tokenOut: "EURC", amountIn: "10" });
+    const before = (await allIntents())[0]!;
+    advance(31);
+    kit.setSwapRate("USDC", "EURC", 0.92 * 0.98);
+    const append = events.append.bind(events);
+    events.append = async () => {
+      throw new Error("event log unavailable");
+    };
+    await expect(h.confirm(ctx({ channel: "screen" }), confirmIsland(p).intentId, "screen")).rejects.toThrow("event log unavailable");
+    events.append = append;
+    const after = (await allIntents())[0]!;
+    expect(after.revision).toBe(before.revision);
+    expect(after.params).toEqual(before.params);
+    expect((await islands()).filter((i) => i.kind === "confirm")).toHaveLength(1);
   });
 
   it("executes a fresh swap and suggests earning on the output", async () => {

@@ -163,17 +163,27 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
     const expiresAt = new Date(now.getTime() + TTL_SEC * 1000).toISOString();
     const island = swapIsland(intent.id, p, est, ["The price moved; here's the updated quote."], expiresAt);
     const params = { ...intent.params, minOut: est.minOut };
-    const written = await repo.patchFenced(intent.id, claim, {
-      params,
-      paramsHash: paramsHash(params),
-      preview: { estimatedOut: est.estimatedOut, minOut: est.minOut, fees: est.fees, island, estimated: { "You got": `${est.estimatedOut} ${tokenName(p.tokenOut)}` } },
-      quoteAt: now.toISOString(),
-      previewTurn: ctx.userTurn,
-      expiresAt,
+    // One transaction: the new quote and its card commit together or not at all. The event is appended first
+    // (session_state lock before the intent row, the order publish/cancel use); a failed fence rolls it back.
+    const stale = new Error("stale consent");
+    const written = await db.transaction(async (tx) => {
+      await events.append(tx, ctx.sessionId, island);
+      const ok = await new IntentRepo(tx).patchFenced(intent.id, claim, {
+        params,
+        paramsHash: paramsHash(params),
+        preview: { estimatedOut: est.estimatedOut, minOut: est.minOut, fees: est.fees, island, estimated: { "You got": `${est.estimatedOut} ${tokenName(p.tokenOut)}` } },
+        quoteAt: now.toISOString(),
+        previewTurn: ctx.userTurn,
+        expiresAt,
+      });
+      if (!ok) throw stale;
+      return true;
+    }).catch((e) => {
+      if (e === stale) return false;
+      throw e;
     });
     // Cancelled, superseded, expired or revised while the provider answered: this consent is stale.
     if (!written) throw new ArcieError("POLICY_DENIED", { spoken: STALE_CONSENT });
-    await events.publish(ctx.sessionId, island);
     await audit(db, ctx, "intent.requoted", { estimatedOut: est.estimatedOut }, intent.id);
     return { status: "awaiting_confirmation", summary: island.spokenPrompt, island };
   }

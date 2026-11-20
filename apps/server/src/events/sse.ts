@@ -62,6 +62,9 @@ export function eventRoutes(deps: AppDeps & { authorizeSession?: (sessionId: str
           cursor = snap.cursor;
           snapshotIslands = snap.islands;
         }
+        // An id-only frame (no data, so no event is dispatched) gives the browser a cursor even if no island is
+        // ever sent, so a reconnect resumes here instead of starting a fresh snapshot.
+        if (snapshotIslands.length === 0 && !closed && (await authorized())) await stream.write(`id: ${cursor}\n\n`);
         for (const island of snapshotIslands) {
           if (closed || !(await authorized())) return;
           await stream.writeSSE({ id: String(cursor), event: "island", data: JSON.stringify(island) });
@@ -86,7 +89,7 @@ export function eventRoutes(deps: AppDeps & { authorizeSession?: (sessionId: str
           }
           if (now - lastPing >= pingMs) {
             lastPing = now;
-            await stream.writeSSE({ event: "ping", data: String(now) });
+            await stream.writeSSE({ id: String(cursor), event: "ping", data: String(now) });
           }
           await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
         }

@@ -228,6 +228,17 @@ describe("durable event log over /events", () => {
     expect(islandFrames(freshFrames)[0]!.id).toBe("3");
   });
 
+  it("a first connect without Last-Event-ID still gets a cursor to resume from", async () => {
+    const { app, db, events } = await testApp({ sse: { maxMs: 150, pollMs: 20 } });
+    const first = await readFrames(await app.request("/events?sessionId=s1"), () => false, 3000); // idle session, no header
+    const cursor = first.map((f) => f.id).filter((id) => id !== undefined).at(-1);
+    expect(cursor).toBeDefined();
+    expect(first.every((f) => f.event !== "island")).toBe(true); // the cursor frame must not trigger the island listener
+    await events.append(db, "s1", receiveIsland("0xwindow")); // lands between close and reconnect
+    const second = await readFrames(await app.request("/events?sessionId=s1", { headers: { "last-event-id": cursor! } }), (f) => kinds(f).includes("receive"), 1500);
+    expect(kinds(second)).toEqual(["receive"]);
+  });
+
   it("sends keep-alive pings between events", async () => {
     const { app } = await testApp({ sse: { pollMs: 20, pingMs: 60 } });
     const frames = await readFrames(await app.request("/events?sessionId=s1"), (f) => f.some((x) => x.event === "ping"), 1500);
