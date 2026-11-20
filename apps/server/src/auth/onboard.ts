@@ -3,6 +3,7 @@ import { DEFAULT_LIMITS, type AgentLimits } from "@arcie/core";
 import { audit, limits, users, type Db } from "@arcie/db";
 import { and, eq, isNull } from "drizzle-orm";
 import { lockUserBudget } from "@arcie/harness";
+import { DripReverted } from "./drip.js";
 import type { Identity } from "./verifier.js";
 
 export interface OnboardDeps {
@@ -10,7 +11,7 @@ export interface OnboardDeps {
   circle: WalletCreator;
   walletSetId: string;
   /** Optional testnet welcome drip; returns the tx hash. */
-  drip?: ((address: `0x${string}`) => Promise<string | null>) | undefined;
+  drip?: ((address: `0x${string}`, submitted: (hash: string) => Promise<void>) => Promise<string | null>) | undefined;
 }
 
 export type User = typeof users.$inferSelect;
@@ -46,13 +47,15 @@ export async function onboard(
       .returning({ id: users.id })).length === 1;
     if (claimed) {
       try {
-        dripTx = await deps.drip(wallet.address);
-        if (dripTx) await db.update(users).set({ welcomeDripTx: dripTx }).where(eq(users.id, id.userId));
+        const record = async (hash: string) => {
+          await db.update(users).set({ welcomeDripTx: hash }).where(eq(users.id, id.userId));
+        };
+        dripTx = await deps.drip(wallet.address, record);
+        if (dripTx) await db.update(users).set({ welcomeDripTx: dripTx }).where(and(eq(users.id, id.userId), isNull(users.welcomeDripTx)));
       } catch (e) {
         // Never reset the claim: an ambiguous send may have landed, and a second automatic payment is worse.
-        const message = (e as Error).message;
-        console.warn(`Welcome drip uncertain for ${id.userId}: ${message}`);
-        await db.insert(audit).values({ userId: id.userId, type: "welcome_drip.uncertain", payload: { address: wallet.address, error: message } });
+        const status = e instanceof DripReverted ? "reverted" : "uncertain";
+        await db.insert(audit).values({ userId: id.userId, type: `welcome_drip.${status}`, payload: { status } });
       }
     }
   }

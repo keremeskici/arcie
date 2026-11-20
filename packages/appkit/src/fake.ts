@@ -69,6 +69,9 @@ export class FakeAppKit implements AppKitPort {
     const min = (out * BigInt(10_000 - p.slippageBps)) / 10_000n;
     return { estimatedOut: this.fmt(p.tokenOut, out), minOut: this.fmt(p.tokenOut, min), fees: [this.fee()] };
   }
+  async readTransaction(_chain: ChainId, txHash: string, _timeoutMs: number): Promise<TxResult["status"]> {
+    return this.txStatus.get(txHash)?.status ?? "PENDING";
+  }
   async waitForSwap(_w: WalletRef, txHash: string, _timeoutMs: number) {
     const tx = this.txStatus.get(txHash);
     if (!tx) throw new ArcieError("NOT_FOUND", { detail: { txHash } });

@@ -1,4 +1,7 @@
 import { ArcieError, type ActionKind } from "@arcie/core";
+import { savedCard } from "@arcie/harness";
+import { confirmClaims } from "@arcie/db";
+import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AppDeps } from "../create-app.js";
@@ -29,10 +32,14 @@ export function intentRoutes(deps: AppDeps) {
     let i = await deps.harness.intents.get(c.req.param("id"));
     if (!i || i.userId !== ctx.userId) throw new ArcieError("NOT_FOUND");
     // Only the owner reaches here. Settle an in-flight intent if it is due a check, then answer with current state.
-    if (i.status === "executing" && (await reconcileIntent(deps, i.id, 3_000).catch((e) => { console.error(`Reconciling intent ${i!.id} failed:`, e); return false; }))) {
+    if (i.status === "executing") {
+      await reconcileIntent(deps, i.id, 3_000).catch(() => console.error("Settlement check failed"));
       i = (await deps.harness.intents.get(i.id)) ?? i;
     }
+    const checking = i.status === "awaiting_confirmation" && (await deps.db.select({ id: confirmClaims.intentId }).from(confirmClaims)
+      .where(and(eq(confirmClaims.intentId, i.id), sql`${confirmClaims.expiresAt} > clock_timestamp()`)).limit(1)).length > 0;
     return c.json({
+      ...(checking ? { checking: true } : {}),
       id: i.id,
       kind: i.kind,
       status: i.status,
@@ -41,14 +48,23 @@ export function intentRoutes(deps: AppDeps) {
       expiresAt: i.expiresAt,
       island: i.status === "succeeded" || i.status === "failed"
         ? i.preview?.receipt ?? null
-        : i.status === "awaiting_confirmation" ? i.preview?.island ?? null : null,
+        : i.status === "awaiting_confirmation" ? savedCard(i) ?? null : null,
       error: i.error,
     });
   });
 
   app.post("/intents/:id/confirm", async (c) => {
     const ctx = await screenCtx(deps, c);
-    const r = await deps.harness.confirm(ctx, c.req.param("id"), "screen");
+    const body = await c.req.text();
+    let revision: number | undefined;
+    if (body) {
+      let json: unknown;
+      try { json = JSON.parse(body); } catch { json = null; }
+      const parsed = z.object({ revision: z.number().int().nonnegative().optional() }).safeParse(json);
+      if (!parsed.success) return c.json({ error: { code: "INVALID_ARGS", message: "Invalid confirmation." } }, 400);
+      revision = parsed.data.revision;
+    }
+    const r = await deps.harness.confirm(ctx, c.req.param("id"), "screen", revision);
     return c.json(r);
   });
 

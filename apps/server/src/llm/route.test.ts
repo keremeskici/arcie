@@ -45,12 +45,13 @@ describe("POST /v1/chat/completions", () => {
     expect(body).toMatchObject({ object: "chat.completion", choices: [{ message: { role: "assistant", content: "Hello there." }, finish_reason: "stop" }] });
   });
 
-  it("counts user turns and never lowers the stored count on a replayed request", async () => {
+  it("ignores duplicate and shorter histories without lending them the current turn", async () => {
     const app = chatRoutes({ db, agent: echoAgent, demoUserId: "demo", model: "m" });
+    await (await post(app, { messages: user(3), session_id: "s1" })).text();
     await (await post(app, { messages: user(3), session_id: "s1" })).text();
     await (await post(app, { messages: user(2), session_id: "s1" })).text();
     expect((await db.select().from(sessions).where(eq(sessions.id, "s1")).limit(1))[0]?.userTurn).toBe(3);
-    expect(seen.map((s) => s.ctx.userTurn)).toEqual([3, 3]);
+    expect(seen.map((s) => s.ctx.userTurn)).toEqual([3]);
   });
 
   it("identifies the user from elevenlabs_extra_body before the demo user", async () => {

@@ -8,6 +8,8 @@ import type {
   StepsIsland,
 } from "@arcie/core";
 import * as React from "react";
+import { api } from "./api";
+import { watchIntent } from "./intent-status";
 
 /** What the screen shows right now. The server is the source of truth; this mirrors its island stream. */
 export type IslandState = {
@@ -31,15 +33,18 @@ const initial: IslandState = {
   balanceTick: 0,
 };
 
-type Action = { type: "island"; island: IslandPayload } | { type: "clear"; key: "confirm" | "receipt" | "choice" | "receive" | "onramp" };
+type Action = { type: "island" | "observed"; island: IslandPayload } | { type: "clear"; key: "confirm" | "receipt" | "choice" | "receive" | "onramp" };
 
 function reduce(s: IslandState, a: Action): IslandState {
   if (a.type === "clear") return { ...s, [a.key]: null };
   const i = a.island;
+  if (a.type === "observed" && i.kind === "confirm" && s.confirm?.intentId !== i.intentId) return s;
   switch (i.kind) {
     case "confirm":
+      if (s.receipt?.intentId === i.intentId || (s.confirm?.intentId === i.intentId && (s.confirm.revision ?? -1) >= (i.revision ?? -1))) return s;
       return { ...s, confirm: i, receipt: null, choice: null };
     case "receipt":
+      if (s.receipt?.intentId === i.intentId) return s;
       return {
         ...s,
         receipt: i,
@@ -65,6 +70,8 @@ type IslandsApi = IslandState & {
   push: (island: IslandPayload) => void;
   clear: (key: "confirm" | "receipt" | "choice" | "receive" | "onramp") => void;
   connected: boolean;
+  verifying: string | null;
+  verify: (id: string) => void;
 };
 
 const Ctx = React.createContext<IslandsApi | null>(null);
@@ -74,9 +81,36 @@ export function IslandsProvider({ sessionId, children }: { sessionId: string; ch
   const [state, dispatch] = React.useReducer(reduce, initial);
   const [connected, setConnected] = React.useState(false);
 
+  const [verifying, setVerifying] = React.useState<string | null>(null);
+  const watchers = React.useRef(new Map<string, () => void>());
+  const watch = React.useCallback((id: string, replace = false) => {
+    const active = watchers.current.get(id);
+    if (active && !replace) return;
+    active?.();
+    watchers.current.set(id, watchIntent((signal) => api.get(`/intents/${encodeURIComponent(id)}`, signal), (row) => {
+      const pending = row.status === "executing" || row.checking === true;
+      setVerifying((old) => pending ? id : old === id ? null : old);
+      if (row.island) dispatch({ type: "observed", island: row.island });
+      if (row.status !== "executing" && row.status !== "awaiting_confirmation") {
+        watchers.current.delete(id);
+        if (!row.island) dispatch({ type: "island", island: { kind: "dismiss", reason: row.status === "expired" ? "expired" : "cancelled", intentId: id } });
+      }
+    }));
+  }, []);
+  const verify = React.useCallback((id: string) => { setVerifying(id); watch(id, true); }, [watch]);
+  React.useEffect(() => {
+    if (state.confirm) watch(state.confirm.intentId);
+  }, [state.confirm, watch]);
+
   React.useEffect(() => {
     const es = new EventSource(`/events?sessionId=${encodeURIComponent(sessionId)}`);
-    es.onopen = () => setConnected(true);
+    const controller = new AbortController();
+    es.onopen = () => {
+      setConnected(true);
+      void api.get<{ executing: string[] }>("/activity?executing=1", controller.signal).then(({ executing }) => {
+        if (!controller.signal.aborted) for (const id of executing) watch(id);
+      }).catch(() => {});
+    };
     es.onerror = () => setConnected(false); // EventSource reconnects on its own
     es.addEventListener("island", (e) => {
       try {
@@ -85,12 +119,17 @@ export function IslandsProvider({ sessionId, children }: { sessionId: string; ch
         /* ignore malformed frames */
       }
     });
-    return () => es.close();
-  }, [sessionId]);
+    return () => {
+      controller.abort();
+      es.close();
+      for (const stop of watchers.current.values()) stop();
+      watchers.current.clear();
+    };
+  }, [sessionId, watch]);
 
   const push = React.useCallback((island: IslandPayload) => dispatch({ type: "island", island }), []);
   const clear = React.useCallback((key: Parameters<IslandsApi["clear"]>[0]) => dispatch({ type: "clear", key }), []);
-  const value = React.useMemo(() => ({ ...state, push, clear, connected }), [state, push, clear, connected]);
+  const value = React.useMemo(() => ({ ...state, push, clear, connected, verifying, verify }), [state, push, clear, connected, verifying, verify]);
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

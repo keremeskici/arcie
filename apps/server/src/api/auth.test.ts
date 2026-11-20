@@ -3,7 +3,7 @@ import type { HarnessCtx } from "@arcie/harness";
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import type { AgentFn } from "../llm/route.js";
-import { testApp } from "../testkit.js";
+import { latch, testApp } from "../testkit.js";
 
 const bearer = (userId: string) => ({ authorization: `Bearer tok-${userId}` });
 
@@ -99,4 +99,62 @@ describe("voice sessions", () => {
     expect(ok.status).toBe(200);
     await ok.body?.cancel();
   });
+});
+
+it("binds implicit screen sessions to the verified user and requires issued live IDs in headers", async () => {
+  const { db, call } = await testApp({ authMode: "privy" });
+  expect((await call("POST", "/receive", {}, bearer("demo"))).status).toBe(200);
+  expect((await db.select().from(sessions).where(eq(sessions.id, "default:demo")))[0]?.userId).toBe("demo");
+  const { sessionId } = await (await call("POST", "/voice/session", {}, bearer("demo"))).json();
+  await db.update(sessions).set({ expiresAt: new Date(0).toISOString() }).where(eq(sessions.id, sessionId));
+  for (const sid of [sessionId, "unissued"]) {
+    expect((await call("POST", "/receive", {}, { ...bearer("demo"), "x-arcie-session": sid })).status).toBe(401);
+  }
+});
+
+it.each(["publish", "confirm"] as const)("new typed turn fences an older voice %s on another instance", async (kind) => {
+  const { createDb } = await import("@arcie/db");
+  const a = await testApp({ authMode: "privy" });
+  const peer = createDb(a.url);
+  const sessionId = (await (await a.call("POST", "/voice/session", {}, bearer("demo"))).json()).sessionId;
+  const headers = { ...bearer("demo"), "x-arcie-session": sessionId };
+  const proposed = await (await a.call("POST", "/intents", { kind: "send", params: { to: "Bob", token: "USDC", amount: "1" } }, headers)).json();
+  const entered = latch();
+  const gate = latch();
+  const agent: AgentFn = async function* (ctx) {
+    if (kind === "confirm") { entered.resolve(); await gate.promise; }
+    try {
+      if (kind === "publish") {
+        a.kit.estimateSend = async () => { entered.resolve(); await gate.promise; return { fee: { amount: "0", token: "USDC", label: "fee" } }; };
+        await a.harness.propose(ctx, "send", { to: "Bob", token: "USDC", amount: "2" });
+      } else await a.harness.confirm(ctx, proposed.island.intentId, "voice");
+    } catch { /* interrupted model work */ }
+    yield "ok";
+  };
+  try {
+    const old = await testApp({ db: a.db, authMode: "privy", agent });
+    const newer = await testApp({ db: peer.db, authMode: "privy" });
+    const msg = { role: "user", content: "fixture" };
+    const working = old.call("POST", "/v1/chat/completions", { session_id: sessionId, messages: [msg] });
+    await entered.promise;
+    expect((await newer.call("POST", "/chat", { messages: [msg, msg] }, headers)).status).toBe(200);
+    gate.resolve();
+    await working;
+    expect(a.kit.calls).toHaveLength(0);
+    expect((await a.harness.intents.get(proposed.island.intentId))?.status).toBe("awaiting_confirmation");
+  } finally { gate.resolve(); await peer.close(); }
+});
+
+it("keeps the owner of a default namespace during concurrent requests from independent apps", async () => {
+  const { createDb } = await import("@arcie/db");
+  const a = await testApp({ authMode: "privy" });
+  const peer = createDb(a.url);
+  try {
+    await seed(a.db, { userId: "second" });
+    const b = await testApp({ db: peer.db, authMode: "privy" });
+    const losing = { ...bearer("second"), "x-arcie-session": "default:demo" };
+    const [mine, other] = await Promise.all([a.call("POST", "/receive", {}, bearer("demo")), b.call("POST", "/receive", {}, losing)]);
+    expect([mine.status, other.status]).toEqual([200, 401]);
+    expect((await a.db.select().from(sessions).where(eq(sessions.id, "default:demo")))[0]?.userId).toBe("demo");
+  } finally { await peer.close(); }
 });

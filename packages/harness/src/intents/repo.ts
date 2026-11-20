@@ -1,11 +1,17 @@
-import type { ActionKind, ChainId, ReceiptIsland } from "@arcie/core";
+import type { ActionKind, ChainId, ConfirmIsland, ReceiptIsland } from "@arcie/core";
 import { confirmClaims, intents, type DbOrTx, type IntentStatus } from "@arcie/db";
-import { and, desc, eq, gte, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, ne, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { paramsHash } from "./hash.js";
 
 export type { IntentStatus } from "@arcie/db";
 export type Intent = typeof intents.$inferSelect;
+/** Older stored cards lack a revision; redisplay them with their durable version before asking for a tap. */
+export function savedCard(intent: Intent): ConfirmIsland | undefined {
+  const card = intent.preview?.island as ConfirmIsland | undefined;
+  if (card?.kind === "confirm") return { ...card, revision: intent.revision };
+}
+
 type IntentPatch = Partial<Omit<Intent, "id" | "status" | "createdAt" | "revision">>;
 
 /** Changes to what the user consented to bump `revision` (in SQL, so concurrent writers can't lose an increment). */
@@ -74,11 +80,13 @@ export class IntentRepo {
   }
 
   /** Compare-and-set: returns false if the intent wasn't in `from` (someone else moved it first). */
-  async transition(id: string, from: IntentStatus, to: IntentStatus, patch: IntentPatch = {}): Promise<boolean> {
+  async transition(id: string, from: IntentStatus, to: IntentStatus, patch: IntentPatch = {}, observed?: { txHash: string | null; revision?: number }): Promise<boolean> {
     const res = await this.db
       .update(intents)
       .set({ ...patch, ...revisionBump(patch), status: to, updatedAt: new Date().toISOString() })
-      .where(and(eq(intents.id, id), eq(intents.status, from)))
+      .where(and(eq(intents.id, id), eq(intents.status, from),
+        observed ? (observed.txHash === null ? isNull(intents.txHash) : eq(intents.txHash, observed.txHash)) : undefined,
+        observed?.revision !== undefined ? eq(intents.revision, observed.revision) : undefined))
       .returning({ id: intents.id });
     return res.length === 1;
   }
@@ -94,7 +102,8 @@ export class IntentRepo {
       eq(intents.id, id),
       eq(intents.status, "awaiting_confirmation"),
       eq(intents.revision, expected.revision),
-      sql`exists (select 1 from ${confirmClaims} where ${confirmClaims.intentId} = ${intents.id} and ${confirmClaims.token} = ${expected.token} and ${confirmClaims.expiresAt} > now())`,
+      sql`(${intents.expiresAt} is null or ${intents.expiresAt}::timestamptz > clock_timestamp())`,
+      sql`exists (select 1 from ${confirmClaims} where ${confirmClaims.intentId} = ${intents.id} and ${confirmClaims.token} = ${expected.token} and ${confirmClaims.expiresAt} > clock_timestamp())`,
     );
   }
 

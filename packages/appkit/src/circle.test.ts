@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { WalletRef } from "./port.js";
 
-const sdk = vi.hoisted(() => ({ swap: vi.fn(), getPosition: vi.fn(), createSession: vi.fn(), createServer: vi.fn() }));
+const sdk = vi.hoisted(() => ({ swap: vi.fn(), waitForSwap: vi.fn(), getPosition: vi.fn(), createSession: vi.fn(), createServer: vi.fn() }));
 vi.mock("@circle-fin/app-kit", () => ({
   KitError: class extends Error {},
   AppKit: class {
     swap = sdk.swap;
+    waitForSwap = sdk.waitForSwap;
     earn = { getPosition: sdk.getPosition };
   },
 }));
@@ -49,4 +50,10 @@ describe("Circle swap execution boundary", () => {
     const kit = createCircleAppKit({ circleApiKey: "TEST_API_KEY:fixture:fixture", entitySecret: "e".repeat(64), onrampApiKey: "test" });
     expect(await kit.getPosition(w, "0x8f2d33b5d4b9b5f02df635ae308f7b4c9da8d2dc")).toBeNull();
   });
+});
+
+it("keeps swap settlement unknown when Circle has no record of the submitted hash", async () => {
+  const kit = createCircleAppKit({ circleApiKey: "TEST_API_KEY:fixture:fixture", entitySecret: "e".repeat(64), onrampApiKey: "test" });
+  sdk.waitForSwap.mockResolvedValue({ progress: { status: "NOT_FOUND" } });
+  expect((await kit.waitForSwap(w, "0x123", 10)).status).toBe("PENDING");
 });

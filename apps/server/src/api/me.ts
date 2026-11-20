@@ -1,13 +1,14 @@
 import { getWallet, HOME_CHAIN } from "@arcie/appkit";
 import { ArcieError, type TokenSymbol } from "@arcie/core";
-import { audit, sessions, users, wallets } from "@arcie/db";
+import { audit, intents, users, wallets } from "@arcie/db";
 import { DbPolicyProvider } from "@arcie/harness";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { z } from "zod";
 import type { AppDeps } from "../create-app.js";
 import { reconcileUser } from "../reconcile.js";
+import { admitTurn } from "../auth/identify.js";
 import { screenCtx } from "./http.js";
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -106,20 +107,20 @@ export function meRoutes(deps: AppDeps) {
     const ctx = await screenCtx(deps, c);
     const body = (await c.req.json().catch(() => ({}))) as { messages?: ChatCompletionMessageParam[] };
     const messages = Array.isArray(body.messages) ? body.messages : [];
-    const incomingTurn = messages.filter((m) => m.role === "user").length;
-    const stored = (await deps.db.select().from(sessions).where(eq(sessions.id, ctx.sessionId)).limit(1))[0];
-    const userTurn = Math.max(incomingTurn, stored?.userTurn ?? 0);
-    await deps.db
-      .insert(sessions)
-      .values({ id: ctx.sessionId, userId: ctx.userId, channel: "repl", userTurn })
-      .onConflictDoUpdate({ target: sessions.id, set: { userTurn, channel: "repl" } });
+    const userTurn = messages.filter((m) => m.role === "user").length;
     let reply = "";
-    for await (const s of deps.agent({ ...ctx, channel: "repl", userTurn }, messages)) reply += s;
+    if (await admitTurn(deps.db, ctx.sessionId, ctx.userId, "repl", userTurn)) {
+      for await (const s of deps.agent({ ...ctx, channel: "repl", userTurn, sessionGuard: "turn" }, messages)) reply += s;
+    }
     return c.json({ reply, sessionId: ctx.sessionId, userTurn });
   });
 
   app.get("/activity", async (c) => {
     const { userId } = await deps.identify(c);
+    // On reconnect, remember which submissions were outstanding before this read reconciles them.
+    const pending = c.req.query("executing") === "1"
+      ? await deps.db.select({ id: intents.id }).from(intents).where(and(eq(intents.userId, userId), eq(intents.status, "executing")))
+      : undefined;
     await reconcileUser(deps, userId); // bounded and deduplicated; never blocks the read on a failing check
     const rows = await deps.db.select().from(audit).where(eq(audit.userId, userId)).orderBy(desc(audit.id)).limit(50);
     const items = rows
@@ -131,7 +132,7 @@ export function meRoutes(deps: AppDeps) {
         // Audit payloads contain internal diagnostics and are never an API contract.
         summary: activitySummary[r.type] ?? "Account activity updated.",
       }));
-    return c.json({ items });
+    return c.json({ items, ...(pending ? { executing: pending.map((i) => i.id) } : {}) });
   });
 
   return app;

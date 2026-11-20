@@ -1,9 +1,10 @@
 import { ArcieError, type AgentLimits, type Channel } from "@arcie/core";
-import { confirmClaims, intents, sessionState, users, type Db, type Tx } from "@arcie/db";
+import { confirmClaims, intents, sessionState, sessions, users, type DbOrTx, type Db, type Tx } from "@arcie/db";
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { assertConfirmable } from "./intents/machine.js";
 import { IntentRepo } from "./intents/repo.js";
+import type { HarnessCtx } from "./context.js";
 import type { PolicyProvider } from "./policy/provider.js";
 
 /**
@@ -12,8 +13,19 @@ import type { PolicyProvider } from "./policy/provider.js";
  * any server instance makes a stale preparation write nothing.
  */
 
+/** Lock the admitted request until this write commits. A newer turn or expired session rolls it back. */
+export async function guardSession(tx: Tx, ctx: HarnessCtx): Promise<number> {
+  if (!ctx.sessionGuard) return ctx.userTurn;
+  const [row] = await tx.select().from(sessions).where(eq(sessions.id, ctx.sessionId)).for("share");
+  const [clock] = await tx.execute<{ expired: boolean }>(sql`select ${row?.expiresAt ?? null}::timestamptz <= clock_timestamp() as expired`);
+  if (!row || row.userId !== ctx.userId || clock?.expired || (ctx.sessionGuard === "turn" && row.userTurn !== ctx.userTurn)) {
+    throw new ArcieError("POLICY_DENIED", { spoken: "That request was interrupted. Please review the current card." });
+  }
+  return row.userTurn;
+}
+
 /** Starts a proposal: bumps the session's generation, marks it as preparing, and returns the new generation. */
-export async function beginProposal(db: Db, sessionId: string): Promise<number> {
+export async function beginProposal(db: DbOrTx, sessionId: string): Promise<number> {
   const [row] = await db
     .insert(sessionState)
     .values({ sessionId, proposalGeneration: 1, preparingGeneration: 1 })
@@ -71,18 +83,18 @@ export async function finishProposal(db: Db, sessionId: string, generation: numb
 /**
  * Takes the intent's confirmation claim, or returns `null` while another instance holds a live one. A claim
  * expires `ttlMs` after it was taken and can then be taken over; both sides of that comparison use database
- * time (`now()`), never an instance clock. Returns the fencing token with the intent's revision at claim time.
+ * time (`clock_timestamp()`), never an instance clock. Returns the fencing token with the intent's revision at claim time.
  */
 export async function claimConfirmation(db: Db, intentId: string, ttlMs = 30_000): Promise<{ token: string; revision: number } | null> {
   const token = randomUUID();
   return db.transaction(async (tx) => {
     const claimed = await tx
       .insert(confirmClaims)
-      .values({ intentId, token, expiresAt: sql`now() + (${ttlMs} * interval '1 millisecond')` })
+      .values({ intentId, token, expiresAt: sql`clock_timestamp() + (${ttlMs} * interval '1 millisecond')` })
       .onConflictDoUpdate({
         target: confirmClaims.intentId,
-        set: { token, expiresAt: sql`now() + (${ttlMs} * interval '1 millisecond')` },
-        setWhere: sql`${confirmClaims.expiresAt} < now()`,
+        set: { token, expiresAt: sql`clock_timestamp() + (${ttlMs} * interval '1 millisecond')` },
+        setWhere: sql`${confirmClaims.expiresAt} < clock_timestamp()`,
       })
       .returning({ token: confirmClaims.token });
     if (claimed.length === 0) return null;
@@ -119,32 +131,43 @@ export interface ClaimExecutionArgs {
   paramsHash: string;
   channel: Channel;
   userTurn: number;
-  now: Date;
+  ctx: HarnessCtx;
   policy: PolicyProvider;
   /** Throws when the action is not allowed; receives the limits and spend read under the budget lock. */
   check: (limits: AgentLimits, spentTodayUsd: number) => void;
 }
 
+/** Lock the lease before the intent so quote writes validate expiry after any row-lock wait. */
+export async function lockConfirmRows(tx: Tx, intentId: string, token: string) {
+  await tx.select({ token: confirmClaims.token }).from(confirmClaims)
+    .where(and(eq(confirmClaims.intentId, intentId), eq(confirmClaims.token, token))).for("update");
+  const [intent] = await tx.select().from(intents).where(eq(intents.id, intentId)).for("update");
+  return intent;
+}
+
 /**
  * Moves an intent to `executing` under the user's budget lock, so intents of one user (in any session or on any
  * instance) can't both pass the daily limit, and limits are the ones in force at this moment. Lock order is
- * fixed: users row, then the claim row, then the intent row (by the fenced update). Returns `false` when the
+ * fixed: users row, then the claim row, then the intent row. Returns `false` when the
  * intent is no longer awaiting confirmation. Call inside one short transaction and never over a network call.
  */
-export async function claimExecution(tx: Tx, a: ClaimExecutionArgs): Promise<boolean> {
+export async function claimExecution(tx: Tx, a: ClaimExecutionArgs): Promise<boolean | "screen_only"> {
   await lockUserBudget(tx, a.userId);
-  // Our claim row: a takeover can't commit while we decide, and the fenced update below rechecks it.
   await tx.select({ token: confirmClaims.token }).from(confirmClaims)
     .where(and(eq(confirmClaims.intentId, a.intentId), eq(confirmClaims.token, a.token))).for("update");
   const limits = await a.policy.getLimits(a.userId, tx);
   const repo = new IntentRepo(tx);
-  const current = await repo.get(a.intentId);
+  const spent = await repo.spentTodayUsd(a.userId, a.ctx.now());
+  const [current] = await tx.select().from(intents).where(eq(intents.id, a.intentId)).for("update");
+  await guardSession(tx, a.ctx);
   if (current?.status !== "awaiting_confirmation") return false;
-  assertConfirmable(current, { channel: a.channel, userTurn: a.userTurn, now: a.now });
+  assertConfirmable(current, { channel: a.channel, userTurn: a.userTurn, now: a.ctx.now() });
+  if (a.channel !== "screen" && current.params.recipientIsNew === true && limits.newRecipientRequiresScreen) return "screen_only";
   if (current.paramsHash !== a.paramsHash) throw new ArcieError("POLICY_DENIED", { spoken: STALE_CONSENT });
-  a.check(limits, await repo.spentTodayUsd(a.userId, a.now));
+  a.check(limits, spent);
   // Atomic with the status change: token live and revision unchanged since the claim, or nothing executes.
   if (await repo.executeFenced(a.intentId, { token: a.token, revision: a.revision }, { confirmedVia: a.channel })) return true;
-  if ((await repo.get(a.intentId))?.status !== "awaiting_confirmation") return false;
+  const [expiry] = await tx.execute<{ expired: boolean }>(sql`select ${current.expiresAt}::timestamptz <= clock_timestamp() as expired`);
+  if (expiry?.expired) throw new ArcieError("QUOTE_EXPIRED");
   throw new ArcieError("POLICY_DENIED", { spoken: STALE_CONSENT });
 }

@@ -1002,7 +1002,7 @@ const HTML = `<!DOCTYPE html>
           "<div>Confirm = " + escapeHtml(island.buttons?.confirm || "") + "</div>" +
           "<div>Expires: " + escapeHtml(island.expiresAt) + "</div>" +
           "</div></div>";
-        $("btn-card-confirm").onclick = () => confirmIntent(island.intentId);
+        $("btn-card-confirm").onclick = () => confirmIntent(island.intentId, island.revision);
         $("btn-card-cancel").onclick = () => cancelIntent(island.intentId);
         return;
       }
@@ -1252,14 +1252,14 @@ const HTML = `<!DOCTYPE html>
       }
     }
 
-    async function confirmIntent(id) {
+    async function confirmIntent(id, revision) {
       const btn = $("btn-card-confirm");
       if (btn) {
         btn.disabled = true;
         btn.textContent = "Executing on Arc Testnet...";
       }
       logStatus("Confirming intent " + id + " on screen...");
-      const r = await api("POST", "/intents/" + encodeURIComponent(id) + "/confirm", {});
+      const r = await api("POST", "/intents/" + encodeURIComponent(id) + "/confirm", { revision });
       if (r.ok) {
         logStatus(r.data.summary || ("Confirmed " + id));
         if (r.data.island) renderIsland(r.data.island);

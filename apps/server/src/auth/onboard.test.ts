@@ -139,3 +139,17 @@ describe("onboard", () => {
     expect((await done).limits).toEqual(DEFAULT_LIMITS);
   });
 });
+
+it("retains the submitted drip hash when the receipt wait fails and stores only a safe audit code", async () => {
+  const { db } = await createTestDb();
+  const drip = async (_address: string, submitted: (hash: string) => Promise<void>) => {
+    await submitted("0xknown");
+    throw new Error("synthetic-private-detail");
+  };
+  const result = await onboard({ db, circle: fakeCircle().circle, walletSetId: "ws", drip }, KEREM);
+  expect(result.user.welcomeDripTx).toBe("0xknown");
+  expect(result.dripTx).toBeNull();
+  const rows = await db.select().from(audit).where(eq(audit.type, "welcome_drip.uncertain"));
+  expect(rows).toHaveLength(1);
+  expect(JSON.stringify(rows)).not.toContain("synthetic-private-detail");
+});

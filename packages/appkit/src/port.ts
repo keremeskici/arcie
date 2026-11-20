@@ -63,6 +63,8 @@ export interface AppKitPort {
   send(w: WalletRef, p: SendParams): Promise<TxResult>;
   estimateSwap(w: WalletRef, p: SwapParams): Promise<{ estimatedOut: string; minOut: string; fees: Fee[] }>;
   swap(w: WalletRef, p: SwapParams): Promise<TxResult>;
+  /** Read the confirmed Arc receipt without submitting or retrying a transfer. */
+  readTransaction(chain: ChainId, txHash: string, timeoutMs: number): Promise<TxResult["status"]>;
   waitForSwap(w: WalletRef, txHash: string, timeoutMs: number): Promise<TxResult>;
   listVaults(chain: ChainId, token?: TokenSymbol): Promise<Vault[]>;
   getDepositQuote(w: WalletRef, p: VaultAmount): Promise<{ vaultName: string; apy: number; fees: Fee[] }>;

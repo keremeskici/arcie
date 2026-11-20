@@ -41,7 +41,7 @@ export function ActionSheet() {
       <Drawer open={open} onOpenChange={onOpenChange}>
         <DrawerContent showClose={card !== "confirm"} title={sheetTitle(card)}>
           {card === "confirm" && confirm ? (
-            <ConfirmCard key={confirm.intentId} island={confirm} onResult={push} voice={voice} />
+            <ConfirmCard key={`${confirm.intentId}:${confirm.revision ?? 0}`} island={confirm} onResult={push} voice={voice} />
           ) : card === "receipt" && receipt ? (
             <ReceiptCard island={receipt} onDone={() => clear("receipt")} voice={voice} />
           ) : card === "choice" && choice ? (
@@ -92,6 +92,7 @@ function useCountdown(expiresAt: string) {
 
 function ConfirmCard({ island, onResult, voice }: { island: ConfirmIsland; onResult: (i: IslandPayload) => void; voice: VoiceBridge }) {
   const [busy, setBusy] = React.useState<"confirm" | "cancel" | null>(null);
+  const { verify, verifying } = useIslands();
   const [error, setError] = React.useState<string | null>(null);
   const { left, label } = useCountdown(island.expiresAt);
   const expired = left === 0;
@@ -100,21 +101,24 @@ function ConfirmCard({ island, onResult, voice }: { island: ConfirmIsland; onRes
     setBusy(kind);
     setError(null);
     try {
-      const r = await api.post<{ island?: IslandPayload; summary?: string; status?: string }>(`/intents/${island.intentId}/${kind}`, kind === "confirm" ? { channel: "screen" } : {});
-      voice.tell(kind === "confirm" ? `The user confirmed intent ${island.intentId} on screen.` : `The user cancelled intent ${island.intentId} on screen.`);
+      const r = await api.post<{ island?: IslandPayload; summary?: string; status?: string }>(`/intents/${island.intentId}/${kind}`, kind === "confirm" ? { channel: "screen", revision: island.revision } : {});
+      if (kind === "cancel" || r.status === "succeeded" || r.status === "executing") voice.tell(r.summary ?? "The action was updated.");
+      if (kind === "confirm" && (!r.island || r.status === "executing")) verify(island.intentId);
+      setBusy(null);
       if (r.island) onResult(r.island);
       else if (kind === "cancel") onResult({ kind: "dismiss", intentId: island.intentId, reason: "cancelled" });
     } catch (e) {
-      setError(e instanceof Error ? e.message : "That didn't go through.");
+      if (kind === "confirm") verify(island.intentId);
+      setError(e instanceof Error ? e.message : "Checking the status of your request.");
       setBusy(null);
     }
   }
 
-  if (busy === "confirm") {
+  if (busy === "confirm" || verifying === island.intentId) {
     return (
       <div className="flex flex-col items-center gap-4 py-10">
         <span className="size-12 animate-spin rounded-full border-2 border-white/10 border-t-accent" />
-        <p className="text-[15px] font-medium">Sending on Arc…</p>
+        <p className="text-[15px] font-medium">Checking your transaction…</p>
         <p className="text-sm text-muted">This usually takes a few seconds.</p>
       </div>
     );

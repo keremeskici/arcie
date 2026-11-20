@@ -63,7 +63,7 @@ export async function createRuntime(env: Env): Promise<{ app: Hono; close(): Pro
       identify: createIdentify({ mode: env.AUTH_MODE, verifier, demoUserId: env.DEMO_USER_ID }),
       onboard: (id) => {
         if (!env.CIRCLE_WALLET_SET_ID) throw new Error("CIRCLE_WALLET_SET_ID is missing; run `pnpm provision` first.");
-        return onboard({ db, circle, walletSetId: env.CIRCLE_WALLET_SET_ID, drip: drip ? (address) => drip(address) : undefined }, id);
+        return onboard({ db, circle, walletSetId: env.CIRCLE_WALLET_SET_ID, drip: drip ? (address, submitted) => drip(address, undefined, submitted) : undefined }, id);
       },
       demoUserId: env.DEMO_USER_ID,
       model: env.OPENAI_MODEL,

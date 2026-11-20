@@ -11,7 +11,7 @@ import { IntentRepo } from "./intents/repo.js";
 import { DbPolicyProvider } from "./policy/db-provider.js";
 
 const W: WalletRef = { chain: "Arc_Testnet", address: "0x000000000000000000000000000000000000dEaD", circleWalletId: "w1" };
-const T0 = new Date("2026-11-07T10:00:00.000Z");
+const T0 = new Date();
 
 /** Two harness "instances" (separate pools, kits and buses) sharing one Postgres database. */
 async function twoInstances() {

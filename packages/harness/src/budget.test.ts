@@ -13,7 +13,7 @@ import { IntentRepo } from "./intents/repo.js";
 import { DbPolicyProvider } from "./policy/db-provider.js";
 
 const W: WalletRef = { chain: "Arc_Testnet", address: "0x000000000000000000000000000000000000dEaD", circleWalletId: "w1" };
-const T0 = new Date("2026-11-07T10:00:00.000Z");
+const T0 = new Date();
 
 /** Two harness "instances" (separate pools and kits) sharing one Postgres database and one user. */
 async function setup(over: { dailyCapUsd?: number; maxPerTxUsd?: number } = {}) {
@@ -178,7 +178,7 @@ describe("per-user budget lock", () => {
     });
     await has;
     const out = errOf(s.a.h.confirm(s.ctx("s1"), id, "screen"));
-    await waitForBlocked(s.dbA, '%update "arcie"."intents"%', 1); // confirm holds the budget lock, waits on the intent row
+    await waitForBlocked(s.dbA, '%intents%for update%', 1); // confirm holds the budget lock, waits on the intent row
     release();
     expect(await errOf(other)).toBeNull();
     const e = await out;
@@ -202,4 +202,33 @@ describe("per-user budget lock", () => {
     expect(sends(s.a.kit)).toHaveLength(0);
     expect((await s.dbA.select().from(intents).where(eq(intents.id, id)))[0]!.status).toBe("awaiting_confirmation");
   });
+});
+
+it("rechecks new-recipient tap policy under the budget lock", async () => {
+  const s = await setup();
+  await s.dbA.update(limits).set({ json: { ...DEFAULT_LIMITS, newRecipientRequiresScreen: false } });
+  const result = await s.a.h.propose(s.ctx("s1"), "send", { to: "0x000000000000000000000000000000000000dEaD", amount: "1", token: "USDC" });
+  const id = (result.island as { intentId: string }).intentId;
+  await s.dbA.update(limits).set({ json: { ...DEFAULT_LIMITS, newRecipientRequiresScreen: true } });
+  const voice = await s.a.h.confirm(s.ctx("s1", { channel: "voice", userTurn: 2 }), id, "voice");
+  expect(voice.status).toBe("awaiting_confirmation");
+  expect(sends(s.a.kit)).toHaveLength(0);
+  expect((await s.b.h.confirm(s.ctx("s1"), id, "screen")).status).toBe("succeeded");
+});
+
+it.each(["claim", "card"])("checks the %s expiry after a budget lock wait", async (kind) => {
+  const s = await setup();
+  const id = await s.propose(s.a, "s1", "1");
+  const lock = await holdBudgetLock(s.dbA);
+  const out = errOf(s.a.h.confirm(s.ctx("s1"), id, "screen"));
+  await waitForBlocked(s.dbB, "%users%for no key update%", 1);
+  if (kind === "claim") {
+    await s.dbB.execute(sql`update arcie.confirm_claims set expires_at = clock_timestamp() where intent_id = ${id}`);
+  } else {
+    await s.dbB.execute(sql`update arcie.intents set expires_at = to_char(clock_timestamp() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') where id = ${id}`);
+  }
+  lock.release();
+  await lock.done;
+  expect(await out).toMatchObject({ code: kind === "claim" ? "POLICY_DENIED" : "QUOTE_EXPIRED" });
+  expect(sends(s.a.kit)).toHaveLength(0);
 });

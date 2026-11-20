@@ -28,13 +28,13 @@ export interface ReconcileDeps {
 export async function reconcileIntent(deps: ReconcileDeps, intentId: string, timeoutMs = CHECK_TIMEOUT_MS): Promise<boolean> {
   const claimed = await deps.db
     .update(intents)
-    .set({ reconcileCheckedAt: sql`now()` })
+    .set({ reconcileCheckedAt: sql`clock_timestamp()` })
     .where(and(
       eq(intents.id, intentId),
       eq(intents.status, "executing"),
-      or(isNull(intents.reconcileCheckedAt), lt(intents.reconcileCheckedAt, sql`now() - ${CHECK_WINDOW}`)),
+      or(isNull(intents.reconcileCheckedAt), lt(intents.reconcileCheckedAt, sql`clock_timestamp() - ${CHECK_WINDOW}`)),
       // A live confirm owns settlement of this intent; recovery only starts once its claim has lapsed.
-      sql`not exists (select 1 from ${confirmClaims} where ${confirmClaims.intentId} = ${intents.id} and ${confirmClaims.expiresAt} > now())`,
+      sql`not exists (select 1 from ${confirmClaims} where ${confirmClaims.intentId} = ${intents.id} and ${confirmClaims.expiresAt} > clock_timestamp())`,
     ))
     .returning({ id: intents.id });
   if (claimed.length === 0) return false;
@@ -61,8 +61,8 @@ export async function reconcileUser(deps: ReconcileDeps, userId: string, budgetM
     if (remaining <= 0) break;
     try {
       if (await reconcileIntent(deps, id, Math.min(CHECK_TIMEOUT_MS, remaining))) reconciled++;
-    } catch (e) {
-      console.error(`Reconciling intent ${id} failed:`, e);
+    } catch {
+      console.error("Settlement check failed");
     }
   }
   return reconciled;
@@ -88,10 +88,9 @@ async function check(deps: ReconcileDeps, i: Intent, timeoutMs: number): Promise
         await deps.events.append(tx, i.sessionId, receipt);
         const won = await new IntentRepo(tx).transition(i.id, "executing", status, {
           actuals: actual, preview: { ...i.preview, receipt },
-          // Missing hashes cannot establish whether funds moved; keep their reservation.
-          statusReason: !i.txHash ? "submission_unknown" : null,
+          statusReason: null,
           error: error ? { code: error.code, message: error.spoken } : null,
-        });
+        }, i);
         if (!won) throw lost;
         await tx.insert(audit).values({
           userId: i.userId, sessionId: i.sessionId, intentId: i.id,
@@ -107,24 +106,33 @@ async function check(deps: ReconcileDeps, i: Intent, timeoutMs: number): Promise
   }
 
   if (i.txHash) {
-    let status: "DONE" | "PENDING" | "FAILED" = "DONE";
+    let status: "DONE" | "PENDING" | "FAILED";
     let amountOut: string | undefined;
     if (i.kind === "swap") {
       const w = await getWallet(deps.db, i.userId, i.chain);
       if (!w) return false;
       const r = await deps.kit.waitForSwap(w, i.txHash, timeoutMs).catch(() => null);
-      if (!r) return false;
+      if (!r || r.txHash !== i.txHash) return false;
       status = r.status;
       amountOut = r.amountOut;
+    } else {
+      status = await deps.kit.readTransaction(i.chain, i.txHash, timeoutMs).catch(() => "PENDING" as const);
     }
     if (status === "PENDING") return false;
     const actual = i.kind === "swap"
       ? { "You got": amountOut ? `${amountOut} ${tokenName(String(i.params.tokenOut ?? ""))}` : null }
       : (i.actuals ?? {}) as Record<string, string | null>;
-    return finish(actual, status === "FAILED" ? new ArcieError("UNKNOWN", { spoken: "That transaction failed onchain. Check your activity for details." }) : undefined);
+    return finish(status === "FAILED" ? {} : actual, status === "FAILED" ? new ArcieError("UNKNOWN", { spoken: "That transaction failed onchain. Check your activity for details." }) : undefined);
   }
-  if (now.getTime() - new Date(i.createdAt).getTime() > ORPHAN_AFTER_MS) {
-    return finish({}, new ArcieError("UNKNOWN", { spoken: "I lost track of that request. Please check your activity before trying again." }));
+  if (i.statusReason !== "submission_unknown" && now.getTime() - new Date(i.createdAt).getTime() > ORPHAN_AFTER_MS) {
+    const summary = "I couldn't verify that transaction. Please check your activity before trying again.";
+    await deps.db.transaction(async (tx) => {
+      const marked = await new IntentRepo(tx).transition(i.id, "executing", "executing", {
+        statusReason: "submission_unknown", error: { code: "UNKNOWN", message: summary },
+      }, i);
+      if (marked) await tx.insert(audit).values({ userId: i.userId, sessionId: i.sessionId, intentId: i.id,
+        type: "intent.uncertain", payload: { recovered: true, code: "UNKNOWN" } });
+    });
   }
   return false;
 }

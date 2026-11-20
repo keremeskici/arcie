@@ -79,3 +79,9 @@ export async function testApp(over: Partial<AppDeps> & { authMode?: AuthMode } =
     })) as TestResponse;
   return { app, db, url, kit, events, harness, call, close };
 }
+
+export function latch() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => { resolve = r; });
+  return { promise, resolve };
+}

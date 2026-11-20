@@ -20,6 +20,7 @@ export type IslandPayload =
   | { kind: "choice"; choiceId: string; question: string; options: { id: string; label: string; detail?: string }[] }
   | {
       kind: "confirm";
+      revision?: number;
       intentId: string;
       /** Phrased as a question naming the exact action and size. */
       title: string;

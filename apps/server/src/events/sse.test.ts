@@ -245,3 +245,25 @@ describe("durable event log over /events", () => {
     expect(frames.some((f) => f.event === "ping")).toBe(true);
   });
 });
+
+it("closes during a full burst and resumes at the last delivered event", async () => {
+  const { app, db, events } = await testApp({ sse: { maxMs: 100, pollMs: 10 } });
+  await db.transaction(async (tx) => {
+    for (let i = 0; i < 110; i++) await events.append(tx, "burst", receiveIsland("test"));
+  });
+  const read = (cursor: string) => app.request("/events?sessionId=burst", { headers: { "last-event-id": cursor } });
+  const stream = await read("0");
+  const slow = new Response(stream.body!.pipeThrough(new TransformStream({
+    async transform(chunk, out) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      out.enqueue(chunk);
+    },
+  })));
+  const first = await readFrames(slow, () => false, 2000);
+  const ids = islandFrames(first).map((f) => Number(f.id));
+  expect(ids.length).toBeGreaterThan(0);
+  expect(ids.length).toBeLessThan(100);
+  expect(first.at(-1)?.raw).toContain("retry: 1000");
+  const second = await readFrames(await read(String(ids.at(-1) ?? 0)), () => false, 2000);
+  expect([...ids, ...islandFrames(second).map((f) => Number(f.id))]).toEqual(Array.from({ length: 110 }, (_, i) => i + 1));
+});

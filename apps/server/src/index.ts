@@ -21,7 +21,7 @@ const app = new Hono();
 app.all("*", async (c) => {
   runtime ??= startRuntime().catch((error) => {
     runtime = undefined;
-    console.error("Arcie runtime initialization failed:", error instanceof Error ? error.name : "Unknown error");
+    console.error("Arcie runtime initialization failed");
     throw error;
   });
   let initialized;

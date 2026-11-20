@@ -11,6 +11,8 @@ export interface HarnessCtx {
   /** One agent turn / API call; groups the Steps island. */
   runId: string;
   signal?: AbortSignal;
+  /** Server-issued sessions revalidate ownership/expiry, and model requests must still own their admitted turn. */
+  sessionGuard?: "owner" | "turn";
   /** Correlates a tapped checkout request with its REST and SSE delivery. */
   onrampRequestId?: string;
 }

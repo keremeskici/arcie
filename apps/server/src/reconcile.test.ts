@@ -3,13 +3,13 @@ import { eq, sql } from "drizzle-orm";
 import { IntentRepo } from "@arcie/harness";
 import { describe, expect, it, vi } from "vitest";
 import { reconcileIntent, reconcileUser } from "./reconcile.js";
-import { DEMO_WALLET, testApp } from "./testkit.js";
+import { DEMO_WALLET, latch, testApp } from "./testkit.js";
 
 const NOW = new Date("2026-11-07T12:00:00.000Z");
 const ago = (min: number) => new Date(NOW.getTime() - min * 60_000);
 
 describe("reconcileUser", () => {
-  it("settles a pending swap, fails an orphan, and leaves a fresh one alone", async () => {
+  it("settles a pending swap, reserves an orphan, and leaves a fresh one alone", async () => {
     const { db, kit, events } = await testApp();
     const repo = new IntentRepo(db);
 
@@ -32,14 +32,14 @@ describe("reconcileUser", () => {
     const orphan = await repo.create({ ...base, kind: "send", params: { to: "0x1", amount: "1", token: "USDC" }, now: ago(6) });
     const fresh = await repo.create({ ...base, kind: "send", params: { to: "0x1", amount: "1", token: "USDC" }, now: ago(1) });
 
-    expect(await reconcileUser({ db, kit, events, now: () => NOW }, "demo")).toBe(2);
+    expect(await reconcileUser({ db, kit, events, now: () => NOW }, "demo")).toBe(1);
 
     const byId = Object.fromEntries((await db.select().from(intents)).map((i) => [i.id, i]));
     expect(byId[pending.id]).toMatchObject({ status: "succeeded", actuals: { "You got": null } });
-    expect(byId[orphan.id]).toMatchObject({ status: "failed", error: { code: "UNKNOWN" } });
+    expect(byId[orphan.id]).toMatchObject({ status: "executing", statusReason: "submission_unknown", error: { code: "UNKNOWN" } });
     expect(byId[orphan.id]!.error!.message).toMatch(/check your activity/i);
     expect(byId[fresh.id]!.status).toBe("executing");
-    expect((await events.readAfter("s1", 0)).map((r) => r.island).filter((i) => i.kind === "receipt").map((i) => (i as { status: string }).status).sort()).toEqual(["failed", "succeeded"]);
+    expect((await events.readAfter("s1", 0)).map((r) => r.island).filter((i) => i.kind === "receipt").map((i) => (i as { status: string }).status).sort()).toEqual(["succeeded"]);
   });
 
   it("leaves a still-pending swap executing", async () => {
@@ -197,8 +197,8 @@ describe("on-demand reconciliation", () => {
     expect(status[done.i.id]).toBe("succeeded");
     expect(status[failedTx.i.id]).toBe("failed");
     expect(status[pend.i.id]).toBe("executing");
-    expect(status[sendTx.id]).toBe("succeeded");
-    expect(status[orphan.id]).toBe("failed");
+    expect(status[sendTx.id]).toBe("executing");
+    expect(status[orphan.id]).toBe("executing");
   });
 });
 
@@ -278,4 +278,73 @@ describe("reconciliation versus a live confirm (R19)", () => {
     expect(waits).toHaveLength(2);
     expect(waits.every((w) => w < 10_000)).toBe(true);
   });
+});
+
+it.each(["PENDING", "FAILED", "DONE"] as const)("confirm returns the durable recovery receipt after a late %s result", async (late) => {
+  const t = await testApp();
+  const peer = createDb(t.url);
+  const { island } = await (await t.call("POST", "/intents", { kind: "swap", params: { tokenIn: "USDC", tokenOut: "EURC", amountIn: "6" } })).json();
+  const id = island.intentId;
+  const entered = latch(), release = latch();
+  t.kit.setPendingNext();
+  const recoveryStatus = late === "DONE" ? "FAILED" : "DONE";
+  let n = 0;
+  t.kit.waitForSwap = async (_w, txHash) => {
+    if (++n === 1) { entered.resolve(); await release.promise; return { txHash, status: late, explorerUrl: "fixture" }; }
+    return { txHash, status: recoveryStatus, explorerUrl: "fixture" };
+  };
+  try {
+    const confirming = t.call("POST", `/intents/${id}/confirm`);
+    await entered.promise;
+    await peer.db.update(confirmClaims).set({ expiresAt: sql`clock_timestamp() - interval '1 second'` }).where(eq(confirmClaims.intentId, id));
+    expect(await reconcileIntent({ ...t, db: peer.db }, id)).toBe(true);
+    release.resolve();
+    const returned = await (await confirming).json();
+    const stored = await (await t.call("GET", `/intents/${id}`)).json();
+    expect(returned).toMatchObject({ status: stored.status, island: stored.island });
+    const rows = (await peer.db.select().from(audit).where(eq(audit.intentId, id))).map((r) => r.type);
+    expect(rows.filter((type) => /intent\.(succeeded|failed|pending|uncertain)/.test(type))).toEqual([`intent.${stored.status}`]);
+    expect(t.kit.calls).toHaveLength(1);
+  } finally { release.resolve(); await peer.close(); }
+});
+
+it.each(["send", "earn_deposit", "earn_withdraw"] as const)("requires receipt evidence to resolve %s, including a revert", async (kind) => {
+  const t = await testApp();
+  const repo = t.harness.intents;
+  const base = { kind, sessionId: "s", userId: "demo", chain: "Arc_Testnet" as const, params: {}, preview: {}, status: "executing" as const, usdValue: "3", previewTurn: 0, now: ago(2), ttlSec: 120 };
+  for (const status of ["PENDING", "FAILED", "DONE"] as const) {
+    const row = await repo.create(base);
+    await repo.patch(row.id, { txHash: "fixture-hash" });
+    t.kit.readTransaction = async () => status;
+    await reconcileIntent(t, row.id);
+    expect((await repo.get(row.id))?.status).toBe(status === "PENDING" ? "executing" : status === "FAILED" ? "failed" : "succeeded");
+  }
+  expect(t.kit.calls).toHaveLength(0);
+});
+
+it("a hash committed after an orphan read wins over its stale uncertainty observation", async () => {
+  const t = await testApp();
+  const peer = createDb(t.url);
+  const repo = t.harness.intents;
+  const row = await repo.create({ kind: "send", sessionId: "s", userId: "demo", chain: "Arc_Testnet", params: {}, preview: {}, status: "executing", usdValue: "3", previewTurn: 0, now: ago(7), ttlSec: 120 });
+  const original = IntentRepo.prototype.get;
+  const spy = vi.spyOn(IntentRepo.prototype, "get").mockImplementationOnce(async function (this: IntentRepo, id) {
+    const observed = await original.call(this, id);
+    await new IntentRepo(peer.db).patch(id, { txHash: "fixture-late-hash" });
+    return observed;
+  });
+  try {
+    expect(await reconcileIntent({ ...t, now: () => NOW }, row.id)).toBe(false);
+    expect(await repo.get(row.id)).toMatchObject({ txHash: "fixture-late-hash", status: "executing", statusReason: null });
+    expect((await peer.db.select().from(audit).where(eq(audit.intentId, row.id)))).toHaveLength(0);
+  } finally { spy.mockRestore(); await peer.close(); }
+});
+
+it("lets a reconnected web client discover a voice submission even when its activity read settles it", async () => {
+  const t = await testApp();
+  const { i } = await executingSwap(t, { pending: true });
+  const activity = await (await t.call("GET", "/activity?executing=1")).json();
+  expect(activity.executing).toEqual([i.id]);
+  const result = await (await t.call("GET", `/intents/${i.id}`)).json();
+  expect(result.island).toMatchObject({ kind: "receipt", intentId: i.id });
 });

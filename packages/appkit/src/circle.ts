@@ -51,8 +51,8 @@ function txResult(chain: ChainId, txHash: string, explorerUrl?: string, status: 
 
 function swapStatus(s: string | undefined): TxResult["status"] {
   if (s === "DONE") return "DONE";
-  if (s === "PENDING" || s === undefined) return "PENDING";
-  return "FAILED";
+  if (s === "FAILED") return "FAILED";
+  return "PENDING"; // NOT_FOUND establishes neither success nor failure.
 }
 
 async function guard<T>(fn: () => Promise<T>): Promise<T> {
@@ -137,7 +137,7 @@ export function createCircleAppKit(cfg: CircleAppKitConfig): AppKitPort {
         const step = res.steps?.find((s) => s.txHash);
         const txHash = res.txHash ?? step?.txHash;
         if (!txHash) throw new ArcieError("UNKNOWN", { detail: { sendResult: res } });
-        return txResult(w.chain, txHash, res.explorerUrl ?? step?.explorerUrl);
+        return txResult(w.chain, txHash, res.explorerUrl ?? step?.explorerUrl, "PENDING");
       }),
 
     estimateSwap: (w, p: SwapParams) =>
@@ -169,6 +169,14 @@ export function createCircleAppKit(cfg: CircleAppKitConfig): AppKitPort {
         if (res.amountOut) out.amountOut = res.amountOut;
         return out;
       }),
+
+    readTransaction: async (id, txHash, timeoutMs) => {
+      const chain = getChain(id);
+      const reader = createPublicClient({ chain: chain.viemChain, transport: http(cfg.rpcUrls?.[id] ?? chain.rpcUrl, { retryCount: 0, timeout: timeoutMs }) });
+      const receipt = await reader.getTransactionReceipt({ hash: txHash as `0x${string}` }).catch(() => null);
+      if (!receipt || receipt.transactionHash.toLowerCase() !== txHash.toLowerCase()) return "PENDING";
+      return receipt.status === "success" ? "DONE" : receipt.status === "reverted" ? "FAILED" : "PENDING";
+    },
 
     waitForSwap: (w, txHash, timeoutMs) =>
       guard(async () => {
@@ -206,7 +214,7 @@ export function createCircleAppKit(cfg: CircleAppKitConfig): AppKitPort {
     deposit: (w, p: VaultAmount) =>
       guard(async () => {
         const res = await kit.earn.deposit({ from: from(w), vaultAddress: p.vault, amount: p.amount, ...apiKey } as never);
-        return txResult(w.chain, res.txHash, res.explorerUrl);
+        return txResult(w.chain, res.txHash, res.explorerUrl, "PENDING");
       }),
 
     getWithdrawalQuote: (w, p: VaultAmount) =>
@@ -222,7 +230,7 @@ export function createCircleAppKit(cfg: CircleAppKitConfig): AppKitPort {
     withdraw: (w, p: VaultAmount) =>
       guard(async () => {
         const res = await kit.earn.withdraw({ from: from(w), vaultAddress: p.vault, amount: p.amount, ...apiKey } as never);
-        return txResult(w.chain, res.txHash, res.explorerUrl);
+        return txResult(w.chain, res.txHash, res.explorerUrl, "PENDING");
       }),
 
     getPosition: (w, vault) =>

@@ -3,7 +3,7 @@ import { sessionEvents, sessionState, type Db, type DbOrTx } from "@arcie/db";
 import { randomUUID } from "node:crypto";
 import { and, asc, eq, gt, min, sql } from "drizzle-orm";
 import type { HarnessCtx } from "./context.js";
-import { IntentRepo } from "./intents/repo.js";
+import { IntentRepo, savedCard } from "./intents/repo.js";
 
 const PRUNE_EVERY_MS = 60_000;
 
@@ -70,7 +70,7 @@ export class EventLog {
         await this.onSnapshotRead?.();
         const repo = new IntentRepo(tx);
         const open = await repo.openForSession(sessionId, new Date());
-        const card = (open?.preview as { island?: IslandPayload } | null)?.island;
+        const card = open ? savedCard(open) : undefined;
         const initial = card ?? (await repo.latestReceiptForSession(sessionId));
         return { cursor, islands: initial ? [initial] : [] };
       },

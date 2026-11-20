@@ -32,7 +32,7 @@ export function errorResponse(c: Context, e: unknown) {
     const alreadyHandled = (e.detail as { alreadyHandled?: boolean } | undefined)?.alreadyHandled;
     return c.json({ error: { code: e.code, message: e.spoken } }, alreadyHandled ? 409 : (STATUS[e.code] ?? 500));
   }
-  console.error(e);
+  console.error("Arcie request failed");
   return c.json({ error: { code: "UNKNOWN", message: "Something went wrong on my side." } }, 500);
 }
 
@@ -43,9 +43,16 @@ export function errorFor(code: string, message: string, status: ContentfulStatus
 /** Builds the harness context for a tapped (screen) request. */
 export async function screenCtx(deps: AppDeps, c: Context): Promise<HarnessCtx> {
   const { userId } = await deps.identify(c);
-  const sessionId = c.req.header("x-arcie-session") ?? `default:${userId}`;
-  const row = (await deps.db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1))[0];
-  // A session id is a capability: never let one user act inside another user's session.
-  if (row && row.userId !== userId) throw new AuthError("That session belongs to someone else.");
-  return { userId, sessionId, channel: "screen", userTurn: row?.userTurn ?? 0, now: () => new Date(), runId: randomUUID() };
+  const supplied = c.req.header("x-arcie-session");
+  const sessionId = supplied ?? `default:${userId}`;
+  if (deps.authMode === "privy" && supplied === undefined) {
+    await deps.db.insert(sessions).values({ id: sessionId, userId, channel: "screen" }).onConflictDoNothing();
+  }
+  const [row] = await deps.db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1);
+  if ((row && row.userId !== userId) || (deps.authMode === "privy" &&
+    (!row || (supplied !== undefined && !row.expiresAt) || (row.expiresAt && Date.parse(row.expiresAt) <= Date.now())))) {
+    throw new AuthError("Unknown or expired session.");
+  }
+  return { userId, sessionId, channel: "screen", userTurn: row?.userTurn ?? 0, now: () => new Date(), runId: randomUUID(),
+    ...(deps.authMode === "privy" ? { sessionGuard: "owner" as const } : {}) };
 }

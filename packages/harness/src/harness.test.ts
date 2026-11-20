@@ -11,7 +11,7 @@ import { DbPolicyProvider } from "./policy/db-provider.js";
 
 const SUFFIX = "Say confirm, or tap the card.";
 const W: WalletRef = { chain: "Arc_Testnet", address: "0x000000000000000000000000000000000000dEaD", circleWalletId: "w1" };
-const T0 = new Date("2026-11-07T10:00:00.000Z");
+const T0 = new Date();
 
 async function setup(opts: { confirmChannels?: "any" | "screen" } = {}) {
   const { db } = await createTestDb();

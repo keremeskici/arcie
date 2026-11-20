@@ -17,7 +17,7 @@ export const users = table("users", {
   linkedWallet: text("linked_wallet").$type<`0x${string}`>(),
   /** Set when the testnet welcome drip was claimed (compare-and-set guards double drips). */
   welcomeDripAt: text("welcome_drip_at"),
-  /** Transaction hash of the welcome drip, stored on success. */
+  /** Transaction hash of the welcome drip, stored on submission. */
   welcomeDripTx: text("welcome_drip_tx"),
   createdAt: text("created_at").notNull().$defaultFn(now),
 });
@@ -74,7 +74,7 @@ export const sessions = table("sessions", {
   channel: text("channel").$type<Channel>().notNull(),
   /** Count of user messages seen; voice confirm needs userTurn > intent.previewTurn. */
   userTurn: integer("user_turn").notNull().default(0),
-  /** Voice sessions minted for a logged-in user expire; null = dev/legacy session. */
+  /** Voice sessions minted for a logged-in user expire; null = private screen default or dev/legacy session. */
   expiresAt: text("expires_at"),
 });
 
@@ -89,7 +89,7 @@ export type IntentStatus =
   | "failed";
 
 /**
- * Cross-instance coordination per session. Rows are created on demand (screen sessions have no `sessions` row).
+ * Cross-instance coordination per session. Rows are created on demand.
  * `proposal_generation` orders proposals and cancels; `preparing_generation` is set while a proposal is in flight.
  */
 export const sessionState = table("session_state", {

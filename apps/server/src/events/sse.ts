@@ -71,28 +71,29 @@ export function eventRoutes(deps: AppDeps & { authorizeSession?: (sessionId: str
         }
 
         let lastPing = Date.now();
-        while (!closed) {
-          if (!(await authorized())) break;
+        tail: while (!closed && Date.now() < deadline) {
+          if (!(await authorized())) return;
           const rows = await deps.events.readAfter(sessionId, cursor, BATCH);
           for (const row of rows) {
             if (closed) return;
             if (!(await authorized())) return;
+            if (Date.now() >= deadline) break tail;
             await stream.writeSSE({ id: String(row.seq), event: "island", data: JSON.stringify(row.island) });
             cursor = row.seq;
           }
           if (rows.length === BATCH) continue; // more is waiting; don't sleep
           if (closed) break;
           const now = Date.now();
-          if (now >= deadline) {
-            await stream.write(`retry: ${RETRY_MS}\n\n`);
-            break;
-          }
+          if (now >= deadline) break;
           if (now - lastPing >= pingMs) {
             lastPing = now;
             await stream.writeSSE({ id: String(cursor), event: "ping", data: String(now) });
           }
           await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
         }
+        if (!closed) await stream.write(`retry: ${RETRY_MS}\n\n`);
+      } catch {
+        console.error("Island stream interrupted");
       } finally {
         closed = true;
         clearTimeout(timer);
