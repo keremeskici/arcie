@@ -1,0 +1,12 @@
+node_modules
+.env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+dist
+.DS_Store
+.superpowers/
+coverage
+recovery/
+.claude/worktrees/

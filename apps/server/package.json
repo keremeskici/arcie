@@ -1,0 +1,35 @@
+{
+  "name": "@arcie/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "register-entity-secret": "tsx --env-file=../../.env scripts/register-entity-secret.ts",
+    "provision": "tsx --env-file=../../.env scripts/provision.ts",
+    "smoke": "tsx --env-file=../../.env scripts/smoke.ts",
+    "dev": "tsx watch --env-file=../../.env src/index.ts",
+    "start": "tsx --env-file=../../.env src/index.ts",
+    "chat": "tsx --env-file=../../.env scripts/chat.ts",
+    "evals": "tsx --env-file=../../.env scripts/evals.ts",
+    "check-token": "tsx --env-file=../../.env scripts/check-token.ts"
+  },
+  "dependencies": {
+    "@arcie/appkit": "workspace:^",
+    "@arcie/core": "workspace:^",
+    "@arcie/db": "workspace:^",
+    "@arcie/harness": "workspace:^",
+    "@circle-fin/developer-controlled-wallets": "^10.8.1",
+    "@circle-fin/onramp-kit": "1.0.8",
+    "@hono/node-server": "^2.1.6",
+    "@privy-io/node": "^0.38.0",
+    "drizzle-orm": "^0.45.4",
+    "esbuild": "0.28.2",
+    "hono": "^4.13.16",
+    "openai": "^7.53.0",
+    "viem": "^2.57.16",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15"
+  }
+}

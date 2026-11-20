@@ -1,0 +1,17 @@
+{
+  "name": "@arcie/harness",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@arcie/appkit": "workspace:^",
+    "@arcie/core": "workspace:^",
+    "@arcie/db": "workspace:^",
+    "drizzle-orm": "^0.45.4",
+    "viem": "^2.57.16",
+    "zod": "^4.6.7"
+  }
+}

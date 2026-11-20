@@ -1,0 +1,263 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`buildEarnConfirm > matches the snapshot 1`] = `
+{
+  "adjustments": [],
+  "buttons": {
+    "cancel": "Don't do this.",
+    "confirm": "I've checked the details; do it now.",
+  },
+  "chips": [
+    "Invest",
+    "USD",
+    "4.2% APY",
+  ],
+  "disclosure": [
+    {
+      "text": "You're putting ",
+    },
+    {
+      "bold": true,
+      "text": "20 USD",
+    },
+    {
+      "text": " into Steakhouse USDC",
+    },
+    {
+      "text": ", currently earning ",
+    },
+    {
+      "bold": true,
+      "text": "4.2% APY",
+    },
+    {
+      "text": ".",
+    },
+    {
+      "text": " APY is variable and not guaranteed.",
+    },
+    {
+      "text": " Your money sits in a vault contract until you withdraw.",
+    },
+  ],
+  "expiresAt": "2026-11-07T10:02:00.000Z",
+  "intentId": "i3",
+  "kind": "confirm",
+  "risks": [
+    "APY is variable and not guaranteed.",
+    "Your money sits in a vault contract until you withdraw.",
+  ],
+  "rows": [
+    {
+      "label": "Amount",
+      "value": "20 USD",
+    },
+    {
+      "label": "Vault",
+      "value": "Steakhouse USDC",
+    },
+    {
+      "estimate": true,
+      "label": "Current APY",
+      "value": "4.2%",
+    },
+    {
+      "estimate": true,
+      "label": "Network fee",
+      "value": "0.0112 USD",
+    },
+  ],
+  "spokenPrompt": "Put 20 USD into Steakhouse USDC at about 4.2% APY. Say confirm, or tap the card.",
+  "title": "Put 20 USD into Steakhouse USDC?",
+}
+`;
+
+exports[`buildReceipt > matches the snapshot 1`] = `
+{
+  "elapsedMs": 3100,
+  "explorerUrl": "https://testnet.arcscan.app/tx/0xdef",
+  "intentId": "i1",
+  "kind": "receipt",
+  "newBalance": "4.89 USD",
+  "rows": [
+    {
+      "actual": "5 USD",
+      "estimated": "5 USD",
+      "label": "Sent",
+    },
+    {
+      "actual": null,
+      "estimated": "0.0035 USD",
+      "label": "Network fee",
+    },
+  ],
+  "status": "succeeded",
+  "txHash": "0xdef",
+}
+`;
+
+exports[`buildSendConfirm > matches the snapshot 1`] = `
+{
+  "adjustments": [],
+  "buttons": {
+    "cancel": "Don't do this.",
+    "confirm": "I've checked the details; do it now.",
+  },
+  "chips": [
+    "Send",
+    "USD",
+    "Arc",
+  ],
+  "disclosure": [
+    {
+      "text": "You're sending ",
+    },
+    {
+      "bold": true,
+      "text": "5 USD",
+    },
+    {
+      "text": " to Alice.",
+    },
+    {
+      "text": " The network fee is about ",
+    },
+    {
+      "bold": true,
+      "text": "0.0035 USD",
+    },
+    {
+      "text": ".",
+    },
+    {
+      "text": " Onchain transfers can't be reversed.",
+    },
+  ],
+  "expiresAt": "2026-11-07T10:02:00.000Z",
+  "intentId": "i1",
+  "kind": "confirm",
+  "risks": [
+    "Onchain transfers can't be reversed.",
+  ],
+  "rows": [
+    {
+      "label": "Amount",
+      "value": "5 USD",
+    },
+    {
+      "label": "To",
+      "value": "Alice",
+    },
+    {
+      "estimate": true,
+      "label": "Network fee",
+      "value": "0.0035 USD",
+    },
+  ],
+  "spokenPrompt": "Send 5 USD to Alice, fee under a cent. Say confirm, or tap the card.",
+  "title": "Send 5 USD to Alice?",
+}
+`;
+
+exports[`buildSwapConfirm > matches the snapshot 1`] = `
+{
+  "adjustments": [],
+  "buttons": {
+    "cancel": "Don't do this.",
+    "confirm": "I've checked the details; do it now.",
+  },
+  "chips": [
+    "Swap",
+    "USD → EUR",
+  ],
+  "disclosure": [
+    {
+      "text": "You're swapping ",
+    },
+    {
+      "bold": true,
+      "text": "10 USD",
+    },
+    {
+      "text": " for about ",
+    },
+    {
+      "bold": true,
+      "text": "9.21 EUR",
+    },
+    {
+      "text": ". You'll get at least ",
+    },
+    {
+      "bold": true,
+      "text": "9.1179 EUR",
+    },
+    {
+      "text": " (1% price protection).",
+    },
+    {
+      "text": " Fees: ",
+    },
+    {
+      "bold": true,
+      "text": "0.0002 USD",
+    },
+    {
+      "text": " swap provider fee",
+    },
+    {
+      "text": ", ",
+    },
+    {
+      "bold": true,
+      "text": "0.0447 USD",
+    },
+    {
+      "text": " network fee",
+    },
+    {
+      "text": ".",
+    },
+    {
+      "text": " Price can move before it settles; you'll get at least 9.1179 EUR or it won't go through.",
+    },
+  ],
+  "expiresAt": "2026-11-07T10:02:00.000Z",
+  "intentId": "i2",
+  "kind": "confirm",
+  "risks": [
+    "Price can move before it settles; you'll get at least 9.1179 EUR or it won't go through.",
+  ],
+  "rows": [
+    {
+      "label": "You pay",
+      "value": "10 USD",
+    },
+    {
+      "estimate": true,
+      "label": "You get about",
+      "value": "9.21 EUR",
+    },
+    {
+      "label": "At least",
+      "value": "9.1179 EUR",
+    },
+    {
+      "label": "Price protection",
+      "value": "1%",
+    },
+    {
+      "estimate": true,
+      "label": "Swap provider fee",
+      "value": "0.0002 USD",
+    },
+    {
+      "estimate": true,
+      "label": "Network fee",
+      "value": "0.0447 USD",
+    },
+  ],
+  "spokenPrompt": "Swap 10 USD for about 9.21 EUR, at least 9.1179, fees about 0.0449 USD. Say confirm, or tap the card.",
+  "title": "Swap 10 USD for about 9.21 EUR?",
+}
+`;

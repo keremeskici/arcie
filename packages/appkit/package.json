@@ -1,0 +1,18 @@
+{
+  "name": "@arcie/appkit",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@arcie/core": "workspace:^",
+    "@arcie/db": "workspace:^",
+    "@circle-fin/adapter-circle-wallets": "^1.10.0",
+    "@circle-fin/app-kit": "^1.21.0",
+    "@circle-fin/developer-controlled-wallets": "^10.8.1",
+    "drizzle-orm": "^0.45.4",
+    "viem": "^2.57.16"
+  }
+}

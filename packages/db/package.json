@@ -1,0 +1,21 @@
+{
+  "name": "@arcie/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "drizzle-kit": "^0.31.11"
+  },
+  "dependencies": {
+    "@arcie/core": "workspace:^",
+    "better-sqlite3": "^13.0.3",
+    "drizzle-orm": "^0.45.4"
+  },
+  "scripts": {
+    "db:generate": "drizzle-kit generate"
+  }
+}

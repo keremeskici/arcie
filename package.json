@@ -1,0 +1,25 @@
+{
+  "name": "arcie",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit && pnpm --filter @arcie/web typecheck",
+    "dev": "pnpm --filter @arcie/server dev",
+    "chat": "pnpm --filter @arcie/server chat",
+    "smoke": "pnpm --filter @arcie/server smoke",
+    "provision": "pnpm --filter @arcie/server provision",
+    "evals": "pnpm --filter @arcie/server evals",
+    "check-token": "pnpm --filter @arcie/server check-token",
+    "web": "pnpm --filter @arcie/web dev"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
