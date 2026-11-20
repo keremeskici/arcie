@@ -211,6 +211,29 @@ describe("confirmation claims and fencing", () => {
     expect(intent!.revision).toBe(before + 1);
   });
 
+  it("a requote that loses the fence is denied and rolls its card back", async () => {
+    const { dbA, a, id, later } = await swapSetup();
+    const log = new EventLog(dbA);
+    const seqBefore = (await log.readAfter("s1", 0)).at(-1)!.seq;
+    const [before] = await dbA.select().from(intents).where(eq(intents.id, id));
+    const gate = swapLatch(a.kit);
+    const pending = a.h.confirm(later(), id, "screen");
+    await gate.started;
+    // Another writer revises the card while the estimate is out; the status is still awaiting_confirmation.
+    await new IntentRepo(dbA).patch(id, { preview: { ...before!.preview, bumped: true } });
+    gate.release();
+    await expect(pending).rejects.toMatchObject({ code: "POLICY_DENIED", spoken: "The details changed. Please check the new card and confirm again." });
+    const [after] = await dbA.select().from(intents).where(eq(intents.id, id));
+    expect(after!.revision).toBe(before!.revision + 1); // only the external bump
+    expect(after!.params).toEqual(before!.params);
+    expect(after!.preview).toMatchObject({ bumped: true });
+    const events = await log.readAfter("s1", 0);
+    expect(events.filter((e) => e.island.kind === "confirm")).toHaveLength(1);
+    expect(events.at(-1)!.seq).toBe(seqBefore); // the rolled-back card left no event
+    expect(await log.publish("s1", { kind: "receive", address: "0x1", chain: "Arc_Testnet", tokens: [] })).toBe(seqBefore + 1); // and consumed no seq
+    expect(swaps(a.kit)).toHaveLength(0);
+  });
+
   it("cancel during preparation blocks execution", async () => {
     const { dbA, a, b, ctx, id, later } = await swapSetup();
     const gate = swapLatch(a.kit);
