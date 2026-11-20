@@ -15,6 +15,20 @@
       "when": 1793992549265,
       "tag": "0001_purple_mandroid",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1795191643583,
+      "tag": "0002_voice-recipient-choice",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1795192549161,
+      "tag": "0003_voice-conversation-turns",
+      "breakpoints": true
     }
   ]
 }

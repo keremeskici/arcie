@@ -1,44 +1,53 @@
-import type { AppKitPort } from "@arcie/appkit";
-import { ArcieError, type ActionKind, type Channel, type IslandPayload, type TokenSymbol, tokenName } from "@arcie/core";
+import type { WalletRef } from "@arcie/appkit";
+import { ArcieError, type ActionKind, type Channel, type ChoiceIsland, type IslandPayload, type TokenSymbol, tokenName } from "@arcie/core";
 import { choices, type Db } from "@arcie/db";
 import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { parseUnits } from "viem";
-import { ACTIONS, swapIsland } from "./actions.js";
+import { ACTIONS, swapIsland, type SwapArgs } from "./actions.js";
 import { audit } from "./audit.js";
+import { activeContactChoice, closeContactChoice, contactChoiceIsland, matchContactChoice, noContactChoice } from "./contact-choices.js";
 import type { HarnessCtx } from "./context.js";
+import { CONFIRM_INSTRUCTION } from "./disclosure/prompt.js";
 import { buildReceipt, nextStepFor } from "./disclosure/receipt.js";
 import { EventBus, StepTracker } from "./events.js";
 import { paramsHash } from "./intents/hash.js";
 import { assertConfirmable } from "./intents/machine.js";
 import { IntentRepo, type Intent, type IntentStatus } from "./intents/repo.js";
-import type { PolicyProvider } from "./policy/provider.js";
 import { checkLimits } from "./policy/check.js";
 import { balancesOf, countWord, joinNames, walletFor, type Svc } from "./services.js";
 import { controlTools } from "./tools/control.js";
 import { onrampTools, recordOnrampEvent } from "./tools/onramp.js";
-import { proposeTools } from "./tools/propose.js";
-import { readTools } from "./tools/read.js";
+import { legacyEarnArgs, proposeTools } from "./tools/propose.js";
+import { readTools, readSwapQuote } from "./tools/read.js";
+import { screenSwap, type ScreenSwapRequest, type ScreenSwapResult } from "./screen-swap.js";
 import type { ToolDef, ToolResult } from "./tools/registry.js";
 
 const TTL_SEC = 120;
 const QUOTE_FRESH_MS = 30_000;
 const SCREEN_ONLY = "Tap confirm on the card to finish.";
+const reviewSummary = (spokenPrompt: string, tapOnly: boolean) =>
+  tapOnly ? spokenPrompt.slice(0, -CONFIRM_INSTRUCTION.length) + SCREEN_ONLY : spokenPrompt;
 
 export type ConfirmResult = { status: IntentStatus; summary: string; island?: IslandPayload };
 
 export interface Harness {
   tools: ToolDef<any>[];
   intents: IntentRepo;
+  quoteSwap(ctx: HarnessCtx, params: SwapArgs): ReturnType<typeof readSwapQuote>;
+  screenSwap(ctx: HarnessCtx, request: ScreenSwapRequest): Promise<ScreenSwapResult>;
   runTool(ctx: HarnessCtx, name: string, rawArgs: unknown): Promise<ToolResult>;
   propose(ctx: HarnessCtx, kind: ActionKind, params: unknown): Promise<ToolResult>;
   confirm(ctx: HarnessCtx, intentId: string | undefined, channel: Channel): Promise<ConfirmResult>;
   cancel(ctx: HarnessCtx, intentId?: string): Promise<ToolResult>;
+  pendingChoice(sessionId: string, now: Date): ChoiceIsland | null;
   answerChoice(ctx: HarnessCtx, choiceId: string, optionId: string): Promise<void>;
+  prepareChoice(ctx: HarnessCtx, choiceId: string, optionId: string): Promise<ToolResult>;
+  dismissChoice(ctx: HarnessCtx, choiceId: string): void;
   recordOnrampEvent(ctx: HarnessCtx, e: { type: "submitted" | "settled" | "failed"; payload: unknown }): Promise<void>;
 }
 
-export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyProvider; bus: EventBus; confirmChannels?: "any" | "screen" }): Harness {
+export function createHarness(deps: Pick<Svc, "db" | "kit" | "policy" | "bus" | "tokenUsdPrice" | "refreshIntentStatus"> & { confirmChannels?: "any" | "screen" }): Harness {
   const svc: Svc = { ...deps, repo: new IntentRepo(deps.db), confirmChannels: deps.confirmChannels ?? "any" };
   const { repo, bus, db } = svc;
   const trackers = new Map<string, StepTracker>();
@@ -61,11 +70,15 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
 
   const dismiss = (ctx: HarnessCtx, intentId: string, reason: "cancelled" | "superseded" | "expired") =>
     bus.publish(ctx.sessionId, { kind: "dismiss", intentId, reason });
+  const notifyChoiceClosed = (ctx: HarnessCtx, choiceId: string) =>
+    bus.publish(ctx.sessionId, { kind: "dismiss_choice", choiceId });
 
-  async function propose(ctx: HarnessCtx, kind: ActionKind, params: unknown): Promise<ToolResult> {
+  async function propose(ctx: HarnessCtx, kind: ActionKind, params: unknown, selection?: { choiceId: string; optionId: string }): Promise<ToolResult> {
     assertActive(ctx);
-    // REST and model tools share these exact schemas, including their defaults.
-    const parsed = tools.find((t) => t.name === `propose_${kind}`)?.args.safeParse(params);
+    const schema = kind === "earn_deposit" || kind === "earn_withdraw"
+      ? legacyEarnArgs[kind]
+      : tools.find((t) => t.name === `propose_${kind}`)?.args;
+    const parsed = schema?.safeParse(params);
     if (!parsed?.success) return { summary: "I didn't quite catch that. Could you check the action details?", data: { error: "INVALID_ARGS" } };
     const generation = Symbol();
     preparations.set(ctx.sessionId, generation);
@@ -75,12 +88,24 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
       assertActive(ctx);
       if (preparations.get(ctx.sessionId) !== generation) return { summary: "That preparation was cancelled or replaced.", data: { cancelled: true } };
       const now = ctx.now();
+      const previousChoice = activeContactChoice(db, ctx.sessionId, now, ctx.userId);
+      if (selection && previousChoice?.id !== selection.choiceId) throw noContactChoice();
 
       if (prep.type === "choice") {
         const id = randomUUID();
-        db.insert(choices).values({ id, sessionId: ctx.sessionId, question: prep.question, options: prep.options, createdAt: now.toISOString() }).run();
-        const island: IslandPayload = { kind: "choice", choiceId: id, question: prep.question, options: prep.options };
+        const expiresAt = new Date(now.getTime() + TTL_SEC * 1000).toISOString();
+        const { choice, superseded } = db.transaction(() => {
+          if (previousChoice) closeContactChoice(db, ctx, previousChoice.id);
+          const choice = db.insert(choices).values({
+            id, sessionId: ctx.sessionId, userId: ctx.userId, question: prep.question, options: prep.options,
+            send: prep.send, previewTurn: ctx.userTurn, createdAt: now.toISOString(), expiresAt,
+          }).returning().get();
+          return { choice, superseded: repo.supersedeOpen(ctx.sessionId) };
+        });
+        const island = contactChoiceIsland(choice);
         bus.publish(ctx.sessionId, island);
+        if (previousChoice) notifyChoiceClosed(ctx, previousChoice.id);
+        for (const old of superseded) dismiss(ctx, old, "superseded");
         const names = prep.options.map((o) => o.label);
         return { summary: `I found ${countWord(names.length)} contacts: ${joinNames(names)}. Which one?`, data: { choiceId: id, options: prep.options }, island };
       }
@@ -92,13 +117,20 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
         return { summary: prep.reason, data: { error: prep.code, intentId: i.id } };
       }
 
-      const intent = repo.create({ ...base, params: { ...prep.params, requireScreen: prep.requireScreen }, preview: prep.preview, status: "awaiting_confirmation" });
-      for (const old of repo.supersedeOpen(ctx.sessionId, intent.id)) dismiss(ctx, old, "superseded");
-      const island = prep.buildIsland(intent.id, intent.expiresAt!);
-      repo.patch(intent.id, { preview: { ...prep.preview, island, estimated: prep.estimated } });
+      const { intent, island, superseded } = db.transaction(() => {
+        if (previousChoice && !closeContactChoice(db, ctx, previousChoice.id, selection?.optionId) && selection) throw noContactChoice();
+        const intent = repo.create({ ...base, params: { ...prep.params, requireScreen: prep.requireScreen }, preview: prep.preview, status: "awaiting_confirmation" });
+        const island = prep.buildIsland(intent.id, intent.expiresAt!);
+        repo.patch(intent.id, { preview: { ...prep.preview, island, estimated: prep.estimated } });
+        return { intent, island, superseded: repo.supersedeOpen(ctx.sessionId, intent.id) };
+      });
       bus.publish(ctx.sessionId, island);
+      if (previousChoice) notifyChoiceClosed(ctx, previousChoice.id);
+      for (const old of superseded) dismiss(ctx, old, "superseded");
+      if (selection) audit(db, ctx, "choice.answered", selection);
       audit(db, ctx, "intent.proposed", { kind, params: prep.params, usdValue: prep.usdValue }, intent.id);
-      const summary = prep.requireScreen ? `${island.spokenPrompt} Because this is a new recipient, please tap confirm on the card.` : island.spokenPrompt;
+      const needsScreen = svc.confirmChannels === "screen" || prep.requireScreen;
+      const summary = reviewSummary(island.spokenPrompt, needsScreen);
       return { summary, data: { intentId: intent.id }, island };
     } finally {
       if (preparations.get(ctx.sessionId) === generation) preparations.delete(ctx.sessionId);
@@ -136,13 +168,18 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
     });
     bus.publish(ctx.sessionId, island);
     audit(db, ctx, "intent.requoted", { estimatedOut: est.estimatedOut }, intent.id);
-    return { status: "awaiting_confirmation", summary: island.spokenPrompt, island };
+    const summary = reviewSummary(island.spokenPrompt, svc.confirmChannels === "screen" || intent.params.requireScreen === true);
+    return { status: "awaiting_confirmation", summary: `The price changed. ${summary}`, island };
   }
 
   async function confirm(ctx: HarnessCtx, intentId: string | undefined, channel: Channel): Promise<ConfirmResult> {
     assertActive(ctx);
     const candidate = intentId ? repo.get(intentId) : repo.latestAwaiting(ctx.sessionId);
-    if (!candidate || candidate.userId !== ctx.userId || candidate.sessionId !== ctx.sessionId) throw new ArcieError("NOT_FOUND");
+    if (!candidate || candidate.userId !== ctx.userId || candidate.sessionId !== ctx.sessionId) {
+      throw new ArcieError("NOT_FOUND", { spoken: !intentId && activeContactChoice(db, ctx.sessionId, ctx.now(), ctx.userId)
+        ? "Choose a recipient first."
+        : "There's nothing waiting for your confirmation right now." });
+    }
     if (confirming.has(candidate.id)) return { status: candidate.status, summary: "I'm already checking that confirmation." };
     confirming.add(candidate.id);
     try {
@@ -198,8 +235,13 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
       return { status: "executing", summary: "Already on it." };
     }
     audit(db, ctx, "intent.confirmed", { channel }, intent.id);
+    bus.publish(ctx.sessionId, { kind: "processing", intentId: intent.id });
 
     const w = await walletFor(svc, ctx, intent.chain);
+    return executeClaimed(ctx, intent, w, started);
+  }
+
+  async function executeClaimed(ctx: HarnessCtx, intent: Intent, w: WalletRef, started: Date): Promise<ConfirmResult> {
     const estimated = (intent.preview?.estimated ?? {}) as Record<string, string | null>;
     const elapsed = () => ctx.now().getTime() - started.getTime();
     let confirmedFailure = false;
@@ -240,15 +282,17 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
       });
       if (done) bus.publish(ctx.sessionId, receipt);
       audit(db, ctx, done ? "intent.succeeded" : "intent.pending", { txHash: ex.tx.txHash, actual: ex.actual }, intent.id);
-      return done
-        ? { status: "succeeded", summary: ex.summary, island: receipt }
-        : { status: "executing", summary: "It's processing; I'll show the receipt when it lands." };
+      if (done) return { status: "succeeded", summary: ex.summary, island: receipt };
+      const summary = "It's processing; I'll show the receipt when it lands.";
+      bus.publish(ctx.sessionId, { kind: "processing", intentId: intent.id, summary });
+      return { status: "executing", summary };
     } catch (e) {
       const err = e instanceof ArcieError ? e : new ArcieError("UNKNOWN", { detail: e });
       if (!confirmedFailure && ["UNKNOWN", "RPC_UNAVAILABLE", "CIRCLE_API_ERROR"].includes(err.code)) {
         const summary = "I couldn't verify that transaction. Please check your activity before trying again.";
         repo.patch(intent.id, { statusReason: "submission_unknown", error: { code: err.code, message: summary } });
         audit(db, ctx, "intent.uncertain", { code: err.code, summary }, intent.id);
+        bus.publish(ctx.sessionId, { kind: "processing", intentId: intent.id, unverified: true, summary });
         return { status: "executing", summary };
       }
       const receipt = buildReceipt({ intentId: intent.id, status: "failed", estimated, actual: {}, elapsedMs: elapsed(), error: err });
@@ -260,9 +304,15 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
   }
 
   async function cancel(ctx: HarnessCtx, intentId?: string): Promise<ToolResult> {
+    assertActive(ctx);
     const intent = intentId ? repo.get(intentId) : repo.latestAwaiting(ctx.sessionId);
     if (intentId && (!intent || intent.userId !== ctx.userId || intent.sessionId !== ctx.sessionId)) throw new ArcieError("NOT_FOUND");
     const stopped = preparations.delete(ctx.sessionId);
+    const choice = !intentId && activeContactChoice(db, ctx.sessionId, ctx.now(), ctx.userId);
+    if (choice) {
+      dismissChoice(ctx, choice.id);
+      return { summary: "I cancelled the send. No money moved.", data: { cancelled: true, choiceId: choice.id } };
+    }
     if (!intent || intent.userId !== ctx.userId || intent.status !== "awaiting_confirmation") {
       return { summary: stopped ? "Okay, I stopped preparing that. Nothing was moved." : "There's nothing to cancel.", data: { cancelled: stopped } };
     }
@@ -274,14 +324,50 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
 
   async function answerChoice(ctx: HarnessCtx, choiceId: string, optionId: string): Promise<void> {
     const c = db.select().from(choices).where(eq(choices.id, choiceId)).get();
-    if (!c || c.sessionId !== ctx.sessionId || !c.options.some((o) => o.id === optionId)) {
+    if (!c || c.sessionId !== ctx.sessionId || (c.userId !== null && c.userId !== ctx.userId) || !c.options.some((o) => o.id === optionId)) {
       throw new ArcieError("NOT_FOUND", { spoken: "I couldn't find that option." });
     }
-    db.update(choices).set({ selectedOptionId: optionId }).where(eq(choices.id, choiceId)).run();
+    if (c.userId !== null) {
+      if (c.selectedOptionId === optionId) return;
+      if (activeContactChoice(db, ctx.sessionId, ctx.now(), ctx.userId)?.id !== c.id || !closeContactChoice(db, ctx, c.id, optionId)) throw noContactChoice();
+      notifyChoiceClosed(ctx, c.id);
+    } else {
+      db.update(choices).set({ selectedOptionId: optionId }).where(eq(choices.id, choiceId)).run();
+    }
     audit(db, ctx, "choice.answered", { choiceId, optionId });
   }
 
-  const api = { propose, confirm, cancel };
+  function dismissChoice(ctx: HarnessCtx, choiceId: string) {
+    if (closeContactChoice(db, ctx, choiceId)) {
+      notifyChoiceClosed(ctx, choiceId);
+      audit(db, ctx, "choice.cancelled", { choiceId });
+    }
+  }
+
+  async function prepareChoice(ctx: HarnessCtx, choiceId: string, optionId: string): Promise<ToolResult> {
+    assertActive(ctx);
+    const choice = activeContactChoice(db, ctx.sessionId, ctx.now(), ctx.userId);
+    if (!choice?.send || choice.id !== choiceId || !choice.options.some((option) => option.id === optionId)) throw noContactChoice();
+    if (ctx.channel !== "screen" && choice.previewTurn !== null && ctx.userTurn <= choice.previewTurn) {
+      throw new ArcieError("POLICY_DENIED", { spoken: "Choose a recipient after seeing or hearing the options." });
+    }
+    return propose(ctx, "send", { ...choice.send, to: optionId }, { choiceId, optionId });
+  }
+
+  async function chooseContact(ctx: HarnessCtx, selection: string): Promise<ToolResult> {
+    const choice = activeContactChoice(db, ctx.sessionId, ctx.now(), ctx.userId);
+    if (!choice) throw noContactChoice();
+    const option = matchContactChoice(choice.options, selection);
+    if (!option) {
+      const summary = choice.options.length <= 2
+        ? `Choose ${choice.options.map((option) => option.label).join(" or ")}.`
+        : "Say a name or choose one of the contacts on screen.";
+      return { summary, data: { needsChoice: true }, island: contactChoiceIsland(choice) };
+    }
+    return prepareChoice(ctx, choice.id, option.id);
+  }
+
+  const api = { propose, confirm, cancel, chooseContact };
   const tools: ToolDef<any>[] = [...readTools(svc), ...proposeTools(api), ...controlTools(api), ...onrampTools(svc)];
 
   async function runTool(ctx: HarnessCtx, name: string, rawArgs: unknown): Promise<ToolResult> {
@@ -310,11 +396,21 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
   return {
     tools,
     intents: repo,
+    quoteSwap: (ctx, args) => readSwapQuote(svc, ctx, args),
+    screenSwap: (ctx, request) => screenSwap(svc, ctx, request, executeClaimed),
     runTool,
     ...api,
+    pendingChoice: (sessionId, now) => {
+      const choice = activeContactChoice(db, sessionId, now);
+      return choice ? contactChoiceIsland(choice) : null;
+    },
     answerChoice,
+    prepareChoice,
+    dismissChoice,
     recordOnrampEvent: (ctx, e) => recordOnrampEvent(svc, ctx, e, (type, payload) => audit(db, ctx, type, payload)),
   };
 }
 
-export type HarnessApi = Pick<Harness, "propose" | "confirm" | "cancel">;
+export type HarnessApi = Pick<Harness, "propose" | "confirm" | "cancel"> & {
+  chooseContact(ctx: HarnessCtx, selection: string): Promise<ToolResult>;
+};

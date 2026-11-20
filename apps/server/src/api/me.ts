@@ -1,19 +1,20 @@
-import { getWallet, HOME_CHAIN } from "@arcie/appkit";
-import { ArcieError, type TokenSymbol } from "@arcie/core";
+import { getAddress } from "viem";
+import { getWallet, HOME_CHAIN, readSavings } from "@arcie/appkit";
+import { ArcieError } from "@arcie/core";
 import { audit, sessions, users, wallets } from "@arcie/db";
-import { DbPolicyProvider } from "@arcie/harness";
-import { desc, eq } from "drizzle-orm";
+import { DbPolicyProvider, quoteSendMax, readWalletBalances } from "@arcie/harness";
+import { and, desc, eq, like, or } from "drizzle-orm";
 import { Hono } from "hono";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { z } from "zod";
 import type { AppDeps } from "../app.js";
 import { screenCtx } from "./http.js";
 
-const round2 = (n: number) => Math.round(n * 100) / 100;
 const swapQuoteBody = z.object({
   tokenIn: z.enum(["USDC", "EURC", "cirBTC"]),
   tokenOut: z.enum(["USDC", "EURC", "cirBTC"]),
   amountIn: z.string().min(1),
+  maxSlippageBps: z.number().int().min(0).max(10_000).optional(),
 });
 const activitySummary: Record<string, string> = {
   "intent.proposed": "Ready for your confirmation.",
@@ -48,37 +49,22 @@ export function meRoutes(deps: AppDeps) {
     if (!user) throw new ArcieError("NOT_FOUND", { spoken: "I don't know this account yet." });
     const ws = deps.db.select().from(wallets).where(eq(wallets.userId, userId)).all();
     const limits = await new DbPolicyProvider(deps.db).getLimits(userId);
-    return c.json({ user, wallets: ws.map((w) => ({ chain: w.chain, address: w.address })), limits });
+    return c.json({ user, wallets: ws.map((w) => ({ chain: w.chain, address: getAddress(w.address) })), limits });
   });
 
   app.get("/balances", async (c) => {
     const { userId } = await deps.identify(c);
     const w = await getWallet(deps.db, userId, HOME_CHAIN);
     if (!w) throw new ArcieError("NOT_FOUND", { spoken: "Your wallet isn't set up yet." });
-    const balances = await deps.kit.getBalances(w);
-    const appKitRate = (token: TokenSymbol) =>
-      deps.kit
-        .getUsdRates(w.chain, [token])
-        .then((r) => r[token])
-        .then((rate) => (rate === undefined || !Number.isFinite(rate) ? null : rate))
-        .catch(() => null);
-    const tokens = await Promise.all(
-      balances.map(async (b) => {
-        const token = b.token as TokenSymbol;
-        if (deps.tokenUsdPrice) {
-          // CoinGecko first (one cached call for all tokens), App Kit if it has no price. null = unknown, never a guess.
-          const usdPrice = (await deps.tokenUsdPrice(token)) ?? (await appKitRate(token));
-          const usd = Number(b.amount) === 0 ? 0 : usdPrice === null ? null : round2(Number(b.amount) * usdPrice);
-          return { ...b, usd, usdPrice };
-        }
-        if (Number(b.amount) === 0) return { ...b, usd: 0 };
-        const rate = await appKitRate(token);
-        return { ...b, usd: rate === null ? null : round2(Number(b.amount) * rate) };
-      }),
-    );
-    const knownSubtotalUsd = round2(tokens.reduce((s, t) => s + (t.usd ?? 0), 0));
-    const totalUsd = tokens.some((t) => t.usd === null) ? null : knownSubtotalUsd;
+    const { tokens, totalUsd, knownSubtotalUsd } = await readWalletBalances(deps.kit, w, deps.tokenUsdPrice);
     return c.json({ chains: [{ chain: w.chain, tokens }], totalUsd, knownSubtotalUsd });
+  });
+
+  app.get("/savings", async (c) => {
+    const { userId } = await deps.identify(c);
+    const wallet = await getWallet(deps.db, userId, HOME_CHAIN);
+    if (!wallet) throw new ArcieError("NOT_FOUND", { spoken: "Your wallet isn't set up yet." });
+    return c.json(await readSavings(deps.kit, wallet));
   });
 
   app.get("/vaults", async (c) => {
@@ -93,19 +79,25 @@ export function meRoutes(deps: AppDeps) {
     return c.json({ vaults, positions });
   });
 
+  app.get("/quotes/send-max", async (c) => {
+    const ctx = await screenCtx(deps, c);
+    const to = c.req.query("to")?.trim();
+    const token = z.enum(["USDC", "EURC", "cirBTC"]).safeParse(c.req.query("token"));
+    if (!token.success) return c.json({ error: { code: "INVALID_ARGS", message: "Choose a wallet currency." } }, 400);
+    c.header("Cache-Control", "no-store");
+    return c.json(await quoteSendMax(deps, ctx, to, token.data));
+  });
+
   app.post("/quotes/swap", async (c) => {
     const parsed = swapQuoteBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: { code: "INVALID_ARGS", message: "Invalid swap quote arguments." } }, 400);
     const ctx = await screenCtx(deps, c);
-    const r = await deps.harness.runTool(ctx, "get_swap_quote", parsed.data);
-    const err = (r.data as { error?: string } | undefined)?.error;
-    if (err) return c.json({ error: { code: err, message: r.summary } }, 400);
-    return c.json({ summary: r.summary, data: r.data });
+    return c.json(await deps.harness.quoteSwap(ctx, parsed.data));
   });
 
   app.post("/receive", async (c) => {
     const ctx = await screenCtx(deps, c);
-    const r = await deps.harness.runTool(ctx, "get_receive_info", {});
+    const r = await deps.harness.runTool({ ...ctx, receiveResponseOnly: c.req.query("delivery") === "response" }, "get_receive_info", {});
     const err = (r.data as { error?: string } | undefined)?.error;
     if (err) return c.json({ error: { code: err, message: r.summary } }, 400);
     return c.json({ summary: r.summary, island: r.island, data: r.data });
@@ -130,16 +122,14 @@ export function meRoutes(deps: AppDeps) {
 
   app.get("/activity", async (c) => {
     const { userId } = await deps.identify(c);
-    const rows = deps.db.select().from(audit).where(eq(audit.userId, userId)).orderBy(desc(audit.id)).limit(50).all();
-    const items = rows
-      .filter((r) => r.type.startsWith("intent.") || r.type.startsWith("onramp."))
-      .map((r) => ({
-        at: r.createdAt,
-        type: r.type,
-        intentId: r.intentId,
-        // Audit payloads contain internal diagnostics and are never an API contract.
-        summary: activitySummary[r.type] ?? "Account activity updated.",
-      }));
+    const rows = deps.db
+      .select({ at: audit.createdAt, type: audit.type, intentId: audit.intentId })
+      .from(audit)
+      .where(and(eq(audit.userId, userId), or(like(audit.type, "intent.%"), like(audit.type, "onramp.%"))))
+      .orderBy(desc(audit.id))
+      .limit(50)
+      .all();
+    const items = rows.map((row) => ({ ...row, summary: activitySummary[row.type] ?? "Account activity updated." }));
     return c.json({ items });
   });
 

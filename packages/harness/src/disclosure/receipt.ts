@@ -1,5 +1,4 @@
 import type { ActionKind, ArcieError, ReceiptIsland } from "@arcie/core";
-import { tokenName } from "@arcie/core";
 
 /** Receipt: actual values side by side with what the confirm card estimated (spec §9.2). */
 export function buildReceipt(i: {
@@ -32,8 +31,8 @@ export function buildReceipt(i: {
 
 /** At most one next step per receipt. */
 export function nextStepFor(kind: ActionKind, params: { tokenOut?: string }): { label: string; utterance: string } | undefined {
-  if (kind === "swap" && (params.tokenOut === "EURC" || params.tokenOut === "USDC")) {
-    return { label: "Earn on it", utterance: `put my ${tokenName(params.tokenOut)} somewhere it earns` };
+  if (kind === "swap" && params.tokenOut === "USDC") {
+    return { label: "Add to savings", utterance: "I want to add USD to savings" };
   }
   if (kind === "earn_deposit") return { label: "Check my earnings", utterance: "how are my earnings" };
   return undefined;

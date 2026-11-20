@@ -33,7 +33,7 @@ export interface AppDeps {
   /** Public client config for the UI. */
   privyAppId?: string | undefined;
   elevenLabsAgentId?: string | undefined;
-  /** Display-only USD prices (CoinGecko Demo, cached) for /balances. Absent: App Kit rates only. */
+  /** Display-only USD prices (CoinGecko Demo, cached). Absent: App Kit rates only. */
   tokenUsdPrice?: ((token: TokenSymbol) => Promise<number | null>) | undefined;
   /** First-login setup: user row, limits, Circle wallet, welcome drip. */
   onboard: (id: Identity) => ReturnType<typeof onboard>;

@@ -1,5 +1,6 @@
 import { ArcieError, formatAmount, parseAmount, type ChainId, type ErrorCode, type TokenSymbol } from "@arcie/core";
 import { randomBytes } from "node:crypto";
+import { SAVINGS_ADDRESS } from "./savings.js";
 import { getChain } from "./chains.js";
 import type { AppKitPort, Fee, Position, SendParams, SwapParams, TxResult, Vault, VaultAmount, WalletRef } from "./port.js";
 
@@ -7,6 +8,7 @@ const FEE = "0.01"; // USDC network fee per write, like gas on Arc
 const RATE_SCALE = 1_000_000n;
 
 const DEFAULT_VAULTS: Vault[] = [
+  { address: SAVINGS_ADDRESS, name: "Fake Savings Provider", token: "USDC", apy: 0.042 },
   { address: "0x00000000000000000000000000000000000000a1", name: "Fake Steady USDC", token: "USDC", apy: 0.042 },
   { address: "0x00000000000000000000000000000000000000a2", name: "Fake High Yield USDC", token: "USDC", apy: 0.061 },
   { address: "0x00000000000000000000000000000000000000b1", name: "Fake EURC Vault", token: "EURC", apy: 0.031 },

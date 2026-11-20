@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { WalletRef } from "./port.js";
 
-const sdk = vi.hoisted(() => ({ swap: vi.fn(), getPosition: vi.fn(), createSession: vi.fn(), createServer: vi.fn() }));
+const sdk = vi.hoisted(() => ({ swap: vi.fn(), waitForSwap: vi.fn(), getPosition: vi.fn(), createSession: vi.fn(), createServer: vi.fn() }));
 vi.mock("@circle-fin/app-kit", () => ({
   KitError: class extends Error {},
   AppKit: class {
     swap = sdk.swap;
+    waitForSwap = sdk.waitForSwap;
     earn = { getPosition: sdk.getPosition };
   },
 }));
@@ -38,6 +39,14 @@ describe("Circle sandbox checkout", () => {
 });
 
 describe("Circle swap execution boundary", () => {
+  it("does not mark a submitted swap failed when its status is not found", async () => {
+    sdk.waitForSwap.mockResolvedValueOnce({ progress: { status: "NOT_FOUND" } });
+    sdk.waitForSwap.mockResolvedValueOnce({ progress: { status: "FAILED" } });
+    const kit = createCircleAppKit({ circleApiKey: "test", entitySecret: "test", onrampApiKey: "test" });
+    await expect(kit.waitForSwap(w, "0x123", 1000)).resolves.toMatchObject({ status: "PENDING" });
+    await expect(kit.waitForSwap(w, "0x123", 1000)).resolves.toMatchObject({ status: "FAILED" });
+  });
+
   it("passes the user's approved floor as the SDK stopLimit (F2)", async () => {
     sdk.swap.mockResolvedValue({ txHash: "0x123", progress: { status: "DONE" }, amountOut: "9.2" });
     const kit = createCircleAppKit({ circleApiKey: "test", entitySecret: "test", onrampApiKey: "test" });

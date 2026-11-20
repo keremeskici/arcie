@@ -69,6 +69,24 @@ async function collect(gen: AsyncGenerator<string>) {
 }
 
 describe("runAgentTurn", () => {
+  it("keeps the first voice review when the model attempts a second proposal in the same turn", async () => {
+    const { client } = scripted([
+      { calls: [{ name: "propose_send", args: { to: "Bob", amount: "5" } }] },
+      { calls: [{ name: "propose_send", args: { to: "Alice Smith", amount: "2" } }] },
+      { text: "Review the send to Bob first." },
+    ]);
+    const { harness, calls } = fakeHarness();
+    harness.tools.find((tool) => tool.name === "propose_send")!.kind = "propose";
+    const run = harness.runTool;
+    harness.runTool = async (...args) => ({ ...await run(...args), island: {
+      kind: "choice", choiceId: "c1", question: "Which contact?", options: [],
+    } });
+    await collect(runAgentTurn({ openai: client, model: "m", harness }, ctx, [
+      { role: "user", content: "Send five to Bob and two to Alice Smith" },
+    ]));
+    expect(calls).toEqual([{ name: "propose_send", args: { to: "Bob", amount: "5" } }]);
+  });
+
   it("runs the tool the model asks for, then streams the final text", async () => {
     const { client, requests } = scripted([
       { calls: [{ name: "propose_send", args: { to: "Bob", amount: "5" } }] },
@@ -146,7 +164,7 @@ describe("real harness tool surface", () => {
     const SPEC = [
       "get_balances", "get_receive_info", "find_contact", "list_contacts", "get_swap_quote", "list_earn_vaults",
       "get_earn_positions", "get_activity", "get_intent", "propose_send", "propose_swap", "propose_earn_deposit",
-      "propose_earn_withdraw", "start_onramp", "confirm_intent", "cancel_intent",
+      "propose_earn_withdraw", "start_onramp", "choose_contact", "confirm_intent", "cancel_intent",
     ];
     const names = toOpenAITools(h.tools).map((t) => (t as { function: { name: string } }).function.name);
     expect(names.sort()).toEqual([...SPEC].sort());

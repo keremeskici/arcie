@@ -2,7 +2,7 @@ import type { Fee } from "@arcie/appkit";
 import type { RichText } from "@arcie/core";
 import { tokenName } from "@arcie/core";
 
-const SUFFIX = "Say confirm, or tap the card.";
+export const CONFIRM_INSTRUCTION = "Say confirm, or tap the card.";
 const MAX_WORDS = 25;
 
 /** Fixed button meanings (spec §9.2). */
@@ -12,7 +12,7 @@ const wordCount = (s: string) => s.trim().split(/\s+/).length;
 
 /** `${core} Say confirm, or tap the card.`; throws if longer than 25 words. */
 export function spokenPrompt(core: string): string {
-  const out = `${core.trim()} ${SUFFIX}`;
+  const out = `${core.trim()} ${CONFIRM_INSTRUCTION}`;
   if (wordCount(out) > MAX_WORDS) throw new Error(`spokenPrompt over ${MAX_WORDS} words: "${out}"`);
   return out;
 }
@@ -52,7 +52,7 @@ export function feePhrase(fees: Fee[]): string {
 }
 
 export function apyText(apy: number | null): string | null {
-  return apy === null ? null : `${Number.parseFloat((apy * 100).toFixed(2))}%`;
+  return apy === null || !Number.isFinite(apy) ? null : `${Number.parseFloat((apy * 100).toFixed(2))}%`;
 }
 
 /** Rich text from plain strings and { b: "bold" } segments. */

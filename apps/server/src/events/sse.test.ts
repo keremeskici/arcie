@@ -54,6 +54,22 @@ describe("GET /events", () => {
     expect(seen[0]).toMatchObject({ kind: "confirm", intentId: p.island.intentId });
   });
 
+  it("replays a pending contact choice on reconnect and then replays the selected review", async () => {
+    const { app, call, kit } = await testApp();
+    const headers = { "x-arcie-session": "s1" };
+    const { island: choice } = await (await call("POST", "/intents", { kind: "send", params: { to: "Alice", amount: "1", token: "EURC" } }, headers)).json();
+    const waitForChoice = await app.request("/events?sessionId=s1");
+    expect((await readIslands(waitForChoice, (i) => i.kind === "choice"))[0]).toEqual(choice);
+    const option = choice.options.find((o: { label: string }) => o.label === "Alice Smith");
+    const selected = await call("POST", `/choices/${choice.choiceId}`, { optionId: option.id, prepare: true }, headers);
+    expect(selected.status).toBe(200);
+    const reconnect = await app.request("/events?sessionId=s1");
+    expect((await readIslands(reconnect, (i) => i.kind === "confirm"))[0]).toMatchObject({
+      kind: "confirm", send: { amount: "1", token: "EURC", recipient: "Alice Smith" },
+    });
+    expect(kit.calls).toEqual([]);
+  });
+
   it("requires a sessionId", async () => {
     const { app } = await testApp();
     expect((await app.request("/events")).status).toBe(400);

@@ -46,8 +46,8 @@ function txResult(chain: ChainId, txHash: string, explorerUrl?: string, status: 
 
 function swapStatus(s: string | undefined): TxResult["status"] {
   if (s === "DONE") return "DONE";
-  if (s === "PENDING" || s === undefined) return "PENDING";
-  return "FAILED";
+  // A missing status snapshot doesn't establish that a submitted swap failed.
+  return s === "FAILED" ? "FAILED" : "PENDING";
 }
 
 async function guard<T>(fn: () => Promise<T>): Promise<T> {

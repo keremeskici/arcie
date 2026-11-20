@@ -16,8 +16,9 @@ interface ChatBody {
   messages?: ChatCompletionMessageParam[];
   user_id?: string;
   session_id?: string;
+  arcie_conversation_id?: string;
   arcie_channel?: Channel;
-  elevenlabs_extra_body?: { user_id?: string; session_id?: string };
+  elevenlabs_extra_body?: { user_id?: string; session_id?: string; arcie_conversation_id?: string };
 }
 
 /**
@@ -46,6 +47,7 @@ export function chatRoutes(deps: { db: Db; agent: AgentFn; demoUserId: string; m
     }
     const extra = body.elevenlabs_extra_body;
     const requestedSession = body.session_id ?? extra?.session_id ?? c.req.header("x-arcie-session");
+    const conversationId = body.arcie_conversation_id ?? extra?.arcie_conversation_id;
     let userId: string;
     let sessionId: string;
     if (deps.authMode === "privy") {
@@ -66,7 +68,14 @@ export function chatRoutes(deps: { db: Db; agent: AgentFn; demoUserId: string; m
     // userTurn = number of user messages; replays/retries must never lower it.
     const incomingTurn = messages.filter((m) => m.role === "user").length;
     const stored = deps.db.select().from(sessions).where(eq(sessions.id, sessionId)).get();
-    const userTurn = Math.max(incomingTurn, stored?.userTurn ?? 0);
+    if (stored && stored.userId !== userId) {
+      return c.json({ error: { message: "This voice session belongs to another user.", type: "invalid_request_error", code: "UNAUTHENTICATED" } }, 401);
+    }
+    if (channel === "voice" && (conversationId !== undefined || stored?.conversationId) && conversationId !== stored?.conversationId) {
+      return c.json({ error: { message: "That voice conversation was replaced. Reopen voice to continue.", type: "invalid_request_error", code: "STALE_CONVERSATION" } }, 409);
+    }
+    const startTurn = channel === "voice" && conversationId ? stored?.conversationStartTurn ?? 0 : 0;
+    const userTurn = Math.max(startTurn + incomingTurn, stored?.userTurn ?? 0);
     deps.db
       .insert(sessions)
       .values({ id: sessionId, userId, channel, userTurn })

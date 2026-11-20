@@ -64,8 +64,15 @@ export function checkLimits(i: Pick<PolicyInput, "action" | "token" | "tokenOut"
 export function checkPolicy(i: PolicyInput): PolicyResult {
   const denied = checkLimits(i);
   if (denied) return denied;
-  const { limits } = i;
+  const funds = checkFunds(i);
+  if (!funds.ok) return funds;
+  const requireScreen = i.recipient?.known === false && i.limits.newRecipientRequiresScreen;
+  return { ...funds, requireScreen };
+}
 
+type FundsInput = Pick<PolicyInput, "amount" | "balance" | "decimals" | "fee" | "token" | "gasBalance" | "feeFromWallet" | "sendAll">;
+
+export function checkFunds(i: FundsInput): Omit<Extract<PolicyResult, { ok: true }>, "requireScreen"> | Extract<PolicyResult, { ok: false }> {
   const balance = units(i.balance, i.decimals);
   const feeInToken = !i.feeFromWallet && i.fee.amount !== null && i.fee.token === i.token ? units(i.fee.amount, i.decimals) : 0n;
   let amount = units(i.amount, i.decimals);
@@ -91,11 +98,10 @@ export function checkPolicy(i: PolicyInput): PolicyResult {
     }
   }
 
-  const requireScreen = i.recipient?.known === false && limits.newRecipientRequiresScreen;
-  return { ok: true, amount: formatAmount(amount, i.decimals), adjustments, requireScreen };
+  return { ok: true, amount: formatAmount(amount, i.decimals), adjustments };
 }
 
-function insufficient(i: PolicyInput, want: string): PolicyResult {
+function insufficient(i: FundsInput, want: string): Extract<PolicyResult, { ok: false }> {
   return {
     ok: false,
     code: "INSUFFICIENT_BALANCE",

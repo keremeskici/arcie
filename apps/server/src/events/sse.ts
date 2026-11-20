@@ -1,3 +1,4 @@
+import { savedReview } from "@arcie/harness";
 import type { IslandPayload } from "@arcie/core";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -28,9 +29,12 @@ export function eventRoutes(deps: AppDeps & { authorizeSession?: (sessionId: str
       };
 
       // A client that connects late still sees the card that's waiting for it.
-      const open = deps.harness.intents.openForSession(sessionId, new Date());
-      const openIsland = (open?.preview as { island?: IslandPayload } | null)?.island;
-      if (openIsland) queue.push(openIsland);
+      const now = new Date();
+      const choice = deps.harness.pendingChoice(sessionId, now);
+      const open = deps.harness.intents.openForSession(sessionId, now);
+      const openIsland = open && savedReview(open);
+      if (choice) queue.push(choice);
+      else if (openIsland) queue.push(openIsland);
       else {
         const receipt = deps.harness.intents.latestReceiptForSession(sessionId);
         if (receipt) queue.push(receipt);

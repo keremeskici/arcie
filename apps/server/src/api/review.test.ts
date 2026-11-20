@@ -36,3 +36,42 @@ it("reports a partial balance instead of valuing unpriced tokens at zero (F13)",
   expect(body.knownSubtotalUsd).toBe(121.74);
   expect(body.chains[0].tokens).toContainEqual({ token: "cirBTC", amount: "0.001", usd: null });
 });
+
+it("permits reopening only a current unexpired review in its originating session", async () => {
+  const { call, harness } = await testApp();
+  const headers = { "x-arcie-session": "here" };
+  const { island } = await (await call("POST", "/intents", {kind:"send", params:{to:"Bob",amount:"1"}}, headers)).json();
+  const path = `/intents/${island.intentId}`;
+  expect(await (await call("GET", path, undefined, headers)).json()).toMatchObject({canReview:true});
+  expect(await (await call("GET", path)).json()).toMatchObject({canReview:false});
+  harness.intents.patch(island.intentId, {expiresAt:new Date(0).toISOString()});
+  expect(await (await call("GET", path, undefined, headers)).json()).toMatchObject({status:"expired",canReview:false,island:null});
+});
+
+it("refreshes a submitted swap from its provider without a server restart or a second swap", async () => {
+  const { call, kit, harness } = await testApp();
+  const h = { "x-arcie-session": "swap-session" };
+  const draft = await (await call("POST", "/intents", {kind:"swap", params:{tokenIn:"USDC", tokenOut:"EURC", amountIn:"5"}}, h)).json();
+  const id = draft.island.intentId;
+  kit.setPendingNext();
+  expect(await (await call("POST", `/intents/${id}/confirm`, {}, h)).json()).toMatchObject({status:"executing"});
+  const hash = harness.intents.get(id)!.txHash!;
+  kit.settle(hash);
+  expect(await (await call("GET", `/intents/${id}`, undefined, h)).json()).toMatchObject({status:"succeeded",island:{kind:"receipt",txHash:hash}});
+  expect(kit.calls.map(c => c.method)).toEqual(["swap"]);
+});
+
+it("gives existing wallets a checksummed receive address that can be pasted into Send", async () => {
+  const { wallets } = await import("@arcie/db");
+  const { call, db, kit } = await testApp();
+  const { DEMO_WALLET } = await import("../testkit.js");
+  kit.setBalance({ ...DEMO_WALLET, address: "0x000000000000000000000000000000000000dead" }, "USDC", "10");
+  db.update(wallets).set({ address: "0x000000000000000000000000000000000000dead" }).run();
+  const receive = await (await call("POST", "/receive")).json();
+  const account = await (await call("GET", "/me")).json();
+  const session = await (await call("POST", "/auth/session")).json();
+  for (const address of [receive.island.address, account.wallets[0].address, session.wallet.address]) {
+    expect(address).toBe("0x000000000000000000000000000000000000dEaD");
+    expect((await call("POST", "/intents", { kind:"send", params:{ to:address, amount:"1" } })).status).toBe(200);
+  }
+});

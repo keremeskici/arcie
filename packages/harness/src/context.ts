@@ -13,4 +13,6 @@ export interface HarnessCtx {
   signal?: AbortSignal;
   /** Correlates a tapped checkout request with its REST and SSE delivery. */
   onrampRequestId?: string;
+  /** A screen can opt to render receive details directly from its HTTP response. */
+  receiveResponseOnly?: boolean;
 }

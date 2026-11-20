@@ -5,6 +5,7 @@ import * as React from "react";
 import { Drawer as BaseDrawer } from "@base-ui/react/drawer";
 import { IconX } from "@tabler/icons-react";
 import { cn } from "@/lib/cn";
+import { useVoiceAccess, VoiceButton, type VoiceHandoff } from "@/lib/voice-access";
 
 export type DrawerSide = "bottom" | "top" | "left" | "right" | "fullscreen";
 
@@ -90,20 +91,24 @@ const sideMotion: Record<DrawerSide, string> = {
   ),
 };
 
-const DrawerContext = React.createContext<{ side: DrawerSide }>({ side: "bottom" });
+const DrawerContext = React.createContext<{ side: DrawerSide; requestedOpen: boolean; suspended: boolean }>({ side: "bottom", requestedOpen: false, suspended: false });
 
 export interface DrawerProps
   extends Omit<React.ComponentPropsWithoutRef<typeof BaseDrawer.Root>, "onOpenChange" | "swipeDirection" | "children"> {
   side?: DrawerSide;
+  voiceHandoff?: VoiceHandoff;
   onOpenChange?: (open: boolean) => void;
   children: React.ReactNode;
 }
 
-export function Drawer({ side = "bottom", onOpenChange, snapPoints, modal = true, children, ...props }: DrawerProps) {
+export function Drawer({ side = "bottom", open, onOpenChange, snapPoints, modal = true, voiceHandoff, children, ...props }: DrawerProps) {
+  const voice = useVoiceAccess();
+  const suspended = !!(voice?.visible || (voice?.activeSheet && voice.activeSheet !== voiceHandoff));
   return (
-    <DrawerContext.Provider value={{ side }}>
+    <DrawerContext.Provider value={{ side, requestedOpen: !!open, suspended }}>
       <BaseDrawer.Root
         modal={modal}
+        open={suspended ? false : open}
         swipeDirection={sideSwipeDirection[side]}
         snapPoints={side === "bottom" || side === "top" ? snapPoints : undefined}
         onOpenChange={onOpenChange ? (open: boolean) => onOpenChange(open) : undefined}
@@ -142,21 +147,29 @@ export interface DrawerContentProps {
   title?: React.ReactNode;
   description?: React.ReactNode;
   showHandle?: boolean;
+  showHeading?: boolean;
   showClose?: boolean;
+  keepMounted?: boolean;
 }
 
-export function DrawerContent({ children, className, title, description, showHandle = true, showClose = true }: DrawerContentProps) {
-  const { side } = React.useContext(DrawerContext);
+export function DrawerContent({ children, className, title, description, showHandle = true, showHeading = true, showClose = true, keepMounted }: DrawerContentProps) {
+  const { side, requestedOpen, suspended } = React.useContext(DrawerContext);
+  const voice = useVoiceAccess();
+  const popup = React.useRef<HTMLDivElement>(null);
+  const restoreTo = voice?.returnFocus.current;
   const isFullscreen = side === "fullscreen";
   const isBottom = side === "bottom";
   const isTop = side === "top";
   const showGrabHandle = showHandle && (isBottom || isTop);
 
   return (
-    <BaseDrawer.Portal>
+    <BaseDrawer.Portal keepMounted={keepMounted || (!!voice && requestedOpen)}>
       <BaseDrawer.Backdrop className={backdropClass} />
       <BaseDrawer.Viewport className="fixed inset-0 z-[var(--primitive-z-overlay,100)] outline-none">
-        <BaseDrawer.Popup className={cn(sideLayout[side], elevatedSurfaceClass, sideMotion[side], "flex flex-col outline-none", className)}>
+        <BaseDrawer.Popup ref={popup}
+          initialFocus={restoreTo && popup.current?.contains(restoreTo) ? () => restoreTo : undefined}
+          finalFocus={suspended ? false : undefined}
+          className={cn(sideLayout[side], elevatedSurfaceClass, sideMotion[side], "flex flex-col outline-none", className)}>
           <BaseDrawer.Content className="relative flex min-h-0 flex-1 flex-col">
             <BaseDrawer.Title className="sr-only">{typeof title === "string" ? title : "Drawer"}</BaseDrawer.Title>
             {description ? (
@@ -171,8 +184,8 @@ export function DrawerContent({ children, className, title, description, showHan
               </div>
             ) : null}
 
-            {(title || description) && (
-              <div className={cn("shrink-0 px-5 pb-2 pr-12", isBottom && showGrabHandle ? "pt-0" : "pt-4")}>
+            {showHeading && (title || description) && (
+              <div className={cn("shrink-0 px-5 pb-2 pr-12", voice && showClose && "pr-24", isBottom && showGrabHandle ? "pt-0" : "pt-4")}>
                 {title ? <p className="text-lg font-semibold tracking-[-0.015em] text-[var(--foreground)]">{title}</p> : null}
                 {description ? <p className="mt-1 text-[13px] text-[var(--muted-foreground)]">{description}</p> : null}
               </div>
@@ -180,6 +193,7 @@ export function DrawerContent({ children, className, title, description, showHan
 
             <DrawerScrollBody className={cn("min-h-0 flex-1", isFullscreen ? "px-5 py-6" : "px-5 pb-5 pt-2")}>{children}</DrawerScrollBody>
 
+            {requestedOpen && <VoiceButton className={cn("absolute top-2", showClose ? "right-12" : "right-2")} />}
             {showClose ? (
               <BaseDrawer.Close
                 className={cn(

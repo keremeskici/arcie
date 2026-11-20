@@ -1,4 +1,4 @@
-import type { ActionKind, AgentLimits, ChainId, Channel } from "@arcie/core";
+import type { ActionKind, AgentLimits, ChainId, Channel, ChoiceIsland } from "@arcie/core";
 import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 const now = () => new Date().toISOString();
@@ -51,6 +51,8 @@ export const sessions = sqliteTable("sessions", {
   channel: text("channel").$type<Channel>().notNull(),
   /** Count of user messages seen; voice confirm needs userTurn > intent.previewTurn. */
   userTurn: integer("user_turn").notNull().default(0),
+  conversationId: text("conversation_id"),
+  conversationStartTurn: integer("conversation_start_turn").notNull().default(0),
   /** Voice sessions minted for a logged-in user expire; null = dev/legacy session. */
   expiresAt: text("expires_at"),
 });
@@ -97,6 +99,11 @@ export const choices = sqliteTable("choices", {
     .$type<{ id: string; label: string; detail?: string }[]>()
     .notNull(),
   selectedOptionId: text("selected_option_id"),
+  userId: text("user_id"),
+  send: text("send_params", { mode: "json" }).$type<NonNullable<ChoiceIsland["send"]>>(),
+  previewTurn: integer("preview_turn"),
+  expiresAt: text("expires_at"),
+  closedAt: text("closed_at"),
   createdAt: text("created_at").notNull().$defaultFn(now),
 });
 

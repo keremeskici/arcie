@@ -1,11 +1,11 @@
-import { getChain, getWallet, HOME_CHAIN, type AppKitPort, type Fee, type Vault, type WalletRef } from "@arcie/appkit";
+import { findSavings, getChain, getWallet, isSavingsAddress, HOME_CHAIN, type AppKitPort, type Fee, type Vault, type WalletRef } from "@arcie/appkit";
 import { ArcieError, type ChainId, type TokenSymbol, tokenName } from "@arcie/core";
 import { contacts, type Db } from "@arcie/db";
 import { eq } from "drizzle-orm";
 import { formatUnits, getAddress, isAddress, parseUnits } from "viem";
 import type { HarnessCtx } from "./context.js";
 import type { EventBus } from "./events.js";
-import type { IntentRepo } from "./intents/repo.js";
+import type { Intent, IntentRepo } from "./intents/repo.js";
 import type { PolicyProvider } from "./policy/provider.js";
 
 /** Everything the tools and actions share. */
@@ -16,15 +16,17 @@ export interface Svc {
   bus: EventBus;
   repo: IntentRepo;
   confirmChannels: "any" | "screen";
+  tokenUsdPrice?: ((token: TokenSymbol) => Promise<number | null>) | undefined;
+  refreshIntentStatus?: ((intent: Intent) => Promise<Intent>) | undefined;
 }
 
-export async function walletFor(svc: Svc, ctx: HarnessCtx, chain: ChainId = HOME_CHAIN): Promise<WalletRef> {
+export async function walletFor(svc: Pick<Svc, "db">, ctx: HarnessCtx, chain: ChainId = HOME_CHAIN): Promise<WalletRef> {
   const w = await getWallet(svc.db, ctx.userId, chain);
   if (!w) throw new ArcieError("NOT_FOUND", { spoken: "Your wallet isn't set up yet." });
   return w;
 }
 
-export async function balancesOf(svc: Svc, w: WalletRef): Promise<Record<TokenSymbol, string>> {
+export async function balancesOf(svc: Pick<Svc, "kit">, w: WalletRef): Promise<Record<TokenSymbol, string>> {
   const list = await svc.kit.getBalances(w);
   return Object.fromEntries(list.map((b) => [b.token, b.amount])) as Record<TokenSymbol, string>;
 }
@@ -69,7 +71,7 @@ export type RecipientResult = { kind: "ok"; recipient: Recipient } | { kind: "ch
 
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
-export function resolveRecipient(svc: Svc, userId: string, to: string): RecipientResult {
+export function resolveRecipient(svc: Pick<Svc, "db">, userId: string, to: string): RecipientResult {
   const t = to.trim();
   if (/\.eth$/i.test(t)) throw new ArcieError("INVALID_RECIPIENT", { spoken: "I can't send to ENS names yet. Use a contact or an address." });
   const book = svc.db.select().from(contacts).where(eq(contacts.userId, userId)).all();
@@ -97,8 +99,14 @@ export function resolveRecipient(svc: Svc, userId: string, to: string): Recipien
   throw new ArcieError("INVALID_RECIPIENT", { spoken: `I don't have a contact called ${t}.` });
 }
 
-/** "best" = highest APY for the token; otherwise match by address or by name. */
+/** Savings has one contract. Older direct clients can still request their original selector. */
 export async function resolveVault(svc: Svc, chain: ChainId, vault: string, token: TokenSymbol = "USDC"): Promise<Vault> {
+  if (vault === "savings" || isSavingsAddress(chain, vault)) {
+    if (token !== "USDC") throw new ArcieError("POLICY_DENIED", { spoken: "Arcie Savings accepts USD only." });
+    const product = await findSavings(svc.kit, chain);
+    if (!product) throw new ArcieError("VAULT_UNAVAILABLE", { spoken: "Savings is unavailable right now." });
+    return product;
+  }
   const all = await svc.kit.listVaults(chain);
   if (vault === "best") {
     const best = all.filter((v) => v.token === token).sort((a, b) => b.apy - a.apy)[0];

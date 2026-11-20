@@ -14,7 +14,7 @@ import { onboard } from "./auth/onboard.js";
 import { createPrivyVerifier } from "./auth/verifier.js";
 import { loadEnv } from "./env.js";
 import { runAgentTurn, type ChatClient } from "./llm/loop.js";
-import { reconcileExecuting } from "./reconcile.js";
+import { reconcileExecuting, refreshIntentStatus } from "./reconcile.js";
 
 const env = loadEnv();
 const root = fileURLToPath(new URL("../../../", import.meta.url));
@@ -31,7 +31,11 @@ const kit = createCircleAppKit({
   ...(env.ARC_RPC_URL ? { rpcUrls: { Arc_Testnet: env.ARC_RPC_URL } } : {}),
 });
 const bus = new EventBus();
-const harness = createHarness({ db, kit, policy: new DbPolicyProvider(db), bus, confirmChannels: env.CONFIRM_CHANNELS });
+const tokenUsdPrice = env.COINGECKO_API_KEY ? createTokenUsdPrices({ apiKey: env.COINGECKO_API_KEY }) : undefined;
+const harness = createHarness({
+  db, kit, policy: new DbPolicyProvider(db), bus, confirmChannels: env.CONFIRM_CHANNELS, tokenUsdPrice,
+  refreshIntentStatus: (intent) => refreshIntentStatus({ db, kit, bus }, intent),
+});
 const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY }) as unknown as ChatClient;
 const agentDeps = { openai, model: env.OPENAI_MODEL, reasoningEffort: env.OPENAI_REASONING_EFFORT, harness };
 
@@ -54,7 +58,7 @@ const app = createApp({
   llmSecret: env.LLM_SHARED_SECRET,
   privyAppId: env.PRIVY_APP_ID,
   elevenLabsAgentId: env.ELEVENLABS_AGENT_ID,
-  tokenUsdPrice: env.COINGECKO_API_KEY ? createTokenUsdPrices({ apiKey: env.COINGECKO_API_KEY }) : undefined,
+  tokenUsdPrice,
   identify: createIdentify({ mode: env.AUTH_MODE, verifier, demoUserId: env.DEMO_USER_ID }),
   onboard: (id) => {
     if (!env.CIRCLE_WALLET_SET_ID) throw new Error("CIRCLE_WALLET_SET_ID is missing; run `pnpm provision` first.");

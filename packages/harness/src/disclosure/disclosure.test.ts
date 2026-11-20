@@ -190,8 +190,9 @@ describe("buildReceipt", () => {
 });
 
 describe("nextStepFor", () => {
-  it("suggests earning after a swap into a stablecoin", () => {
-    expect(nextStepFor("swap", { tokenOut: "EURC" })).toEqual({ label: "Earn on it", utterance: "put my EUR somewhere it earns" });
+  it("suggests savings only after a swap into USD", () => {
+    expect(nextStepFor("swap", { tokenOut: "USDC" })).toEqual({ label: "Add to savings", utterance: "I want to add USD to savings" });
+    expect(nextStepFor("swap", { tokenOut: "EURC" })).toBeUndefined();
   });
 
   it("suggests checking earnings after a deposit", () => {

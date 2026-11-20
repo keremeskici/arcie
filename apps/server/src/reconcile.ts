@@ -2,16 +2,36 @@ import { getChain, getWallet, type AppKitPort } from "@arcie/appkit";
 import { ArcieError, tokenName } from "@arcie/core";
 import { audit, intents, type Db } from "@arcie/db";
 import { buildReceipt, IntentRepo, type EventBus, type Intent } from "@arcie/harness";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 const ORPHAN_AFTER_MS = 5 * 60_000;
 const CHECK_TIMEOUT_MS = 10_000;
+const INTERACTIVE_TIMEOUT_MS = 1_000;
+const pendingChecks = new WeakMap<Db, Map<string, Promise<number>>>();
+type ReconcileDeps = { db: Db; kit: AppKitPort; bus: EventBus; now?: () => Date };
 
-/** Startup recovery; terminal results remain available after the in-memory event is gone. */
-export async function reconcileExecuting(deps: { db: Db; kit: AppKitPort; bus: EventBus; now?: () => Date }): Promise<number> {
+/** The voice status tool and UI reuse an in-flight check of a submitted swap. */
+export async function refreshIntentStatus(deps: ReconcileDeps, intent: Intent): Promise<Intent> {
+  if (intent.kind !== "swap" || intent.status !== "executing" || !intent.txHash) return intent;
+  const { db } = deps;
+  const repo = new IntentRepo(db);
+  const current = repo.get(intent.id) ?? intent;
+  // The submitting request owns settlement until its initial wait finishes and records intent.pending.
+  if (current.status !== "executing" || !db.select({ id: audit.id }).from(audit)
+    .where(and(eq(audit.intentId, current.id), eq(audit.type, "intent.pending"))).get()) return current;
+  const checks = pendingChecks.get(db) ?? new Map<string, Promise<number>>();
+  pendingChecks.set(db, checks);
+  const check = checks.get(current.id) ?? reconcileExecuting(deps, current, INTERACTIVE_TIMEOUT_MS).finally(() => checks.delete(current.id));
+  checks.set(current.id, check);
+  await check;
+  return repo.get(current.id) ?? current;
+}
+
+/** Recover interrupted requests at startup or check one already-submitted swap while the UI is open. */
+export async function reconcileExecuting(deps: ReconcileDeps, pendingSwap?: Intent, timeoutMs = CHECK_TIMEOUT_MS): Promise<number> {
   const now = (deps.now ?? (() => new Date()))();
   const repo = new IntentRepo(deps.db);
-  const stuck = deps.db.select().from(intents).where(eq(intents.status, "executing")).all();
+  const stuck = pendingSwap ? [pendingSwap] : deps.db.select().from(intents).where(eq(intents.status, "executing")).all();
   let reconciled = 0;
 
   function finish(i: Intent, actual: Record<string, string | null>, error?: ArcieError) {
@@ -50,7 +70,7 @@ export async function reconcileExecuting(deps: { db: Db; kit: AppKitPort; bus: E
       if (i.kind === "swap") {
         const w = await getWallet(deps.db, i.userId, i.chain);
         if (!w) continue;
-        const r = await deps.kit.waitForSwap(w, i.txHash, CHECK_TIMEOUT_MS).catch(() => null);
+        const r = await deps.kit.waitForSwap(w, i.txHash, timeoutMs).catch(() => null);
         if (!r) continue;
         status = r.status;
         amountOut = r.amountOut;

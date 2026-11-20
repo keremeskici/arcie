@@ -9,6 +9,9 @@ export type Intent = typeof intents.$inferSelect;
 type IntentPatch = Partial<Omit<Intent, "id" | "status" | "createdAt">>;
 
 export interface IntentDraft {
+  id?: string;
+  confirmedVia?: Intent["confirmedVia"];
+  error?: Intent["error"];
   sessionId: string;
   userId: string;
   kind: ActionKind;
@@ -16,11 +19,11 @@ export interface IntentDraft {
   params: Record<string, unknown>;
   preview: Record<string, unknown>;
   status: IntentStatus;
-  statusReason?: string;
+  statusReason?: string | null;
   usdValue: string;
   previewTurn: number;
   now: Date;
-  ttlSec: number;
+  ttlSec: number | null;
 }
 
 export class IntentRepo {
@@ -31,7 +34,9 @@ export class IntentRepo {
     return this.db
       .insert(intents)
       .values({
-        id: randomUUID(),
+        id: d.id ?? randomUUID(),
+        confirmedVia: d.confirmedVia ?? null,
+        error: d.error ?? null,
         sessionId: d.sessionId,
         userId: d.userId,
         kind: d.kind,
@@ -46,7 +51,7 @@ export class IntentRepo {
         quoteAt: now,
         createdAt: now,
         updatedAt: now,
-        expiresAt: new Date(d.now.getTime() + d.ttlSec * 1000).toISOString(),
+        expiresAt: d.ttlSec === null ? null : new Date(d.now.getTime() + d.ttlSec * 1000).toISOString(),
       })
       .returning()
       .get();
@@ -82,8 +87,8 @@ export class IntentRepo {
     this.db.update(intents).set({ ...patch, updatedAt: new Date().toISOString() }).where(eq(intents.id, id)).run();
   }
 
-  /** Cancels every other awaiting intent in the session (only one Confirm island is ever open); returns their ids. */
-  supersedeOpen(sessionId: string, newIntentId: string): string[] {
+  /** Cancels old awaiting intents when the session starts a new review or recipient choice. */
+  supersedeOpen(sessionId: string, newIntentId?: string): string[] {
     const rows = this.db
       .select({ id: intents.id })
       .from(intents)
@@ -91,7 +96,7 @@ export class IntentRepo {
       .all();
     return rows
       .filter((r) => r.id !== newIntentId)
-      .filter((r) => this.transition(r.id, "awaiting_confirmation", "cancelled", { statusReason: "superseded", supersededBy: newIntentId }))
+      .filter((r) => this.transition(r.id, "awaiting_confirmation", "cancelled", { statusReason: "superseded", supersededBy: newIntentId ?? null }))
       .map((r) => r.id);
   }
 

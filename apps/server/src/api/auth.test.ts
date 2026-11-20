@@ -81,6 +81,34 @@ describe("voice sessions", () => {
     expect(seen[0]).toMatchObject({ userId: "demo", sessionId, channel: "voice" });
   });
 
+  it("preserves turn order across a reopened conversation and rejects the old conversation", async () => {
+    const seen: HarnessCtx[] = [];
+    const agent: AgentFn = async function* (ctx) {
+      seen.push(ctx);
+      yield "ok";
+    };
+    const { call } = await testApp({ authMode: "privy", agent });
+    const { sessionId } = await (await call("POST", "/voice/session", {}, bearer("demo"))).json();
+    const headers = { ...bearer("demo"), "x-arcie-session": sessionId };
+    const start = async () => {
+      const response = await call("POST", "/voice/conversation", {}, headers);
+      expect(response.status).toBe(200);
+      return (await response.json()).conversationId as string;
+    };
+    const speak = (conversationId: string, count: number) => call("POST", "/v1/chat/completions", {
+      messages: Array.from({ length: count }, (_, i) => ({ role: "user", content: `Turn ${i + 1}` })),
+      elevenlabs_extra_body: { session_id: sessionId, arcie_conversation_id: conversationId },
+    });
+    const first = await start();
+    expect((await speak(first, 7)).status).toBe(200);
+    expect((await call("POST", "/voice/conversation", {}, { ...bearer("eve"), "x-arcie-session": sessionId })).status).toBe(401);
+    const next = await start();
+    expect((await speak(next, 1)).status).toBe(200);
+    expect((await speak(first, 8)).status).toBe(409);
+    expect((await speak(next, 2)).status).toBe(200);
+    expect(seen.map((ctx) => ctx.userTurn)).toEqual([7, 8, 9]);
+  });
+
   it("rejects unknown and expired sessions on the custom-LLM endpoint", async () => {
     const { call, db } = await testApp({ authMode: "privy" });
     const body = (sid: string) => ({ messages: [{ role: "user", content: "hi" }], session_id: sid });

@@ -98,6 +98,7 @@ exports[`buildReceipt > matches the snapshot 1`] = `
 
 exports[`buildSendConfirm > matches the snapshot 1`] = `
 {
+  "action": "send",
   "adjustments": [],
   "buttons": {
     "cancel": "Don't do this.",
@@ -154,6 +155,11 @@ exports[`buildSendConfirm > matches the snapshot 1`] = `
       "value": "0.0035 USD",
     },
   ],
+  "send": {
+    "amount": "5",
+    "recipient": "Alice",
+    "token": "USDC",
+  },
   "spokenPrompt": "Send 5 USD to Alice, fee under a cent. Say confirm, or tap the card.",
   "title": "Send 5 USD to Alice?",
 }
@@ -257,7 +263,7 @@ exports[`buildSwapConfirm > matches the snapshot 1`] = `
       "value": "0.0447 USD",
     },
   ],
-  "spokenPrompt": "Swap 10 USD for about 9.21 EUR, at least 9.1179, fees about 0.0449 USD. Say confirm, or tap the card.",
+  "spokenPrompt": "Swap 10 USD for about 9.21 EUR, at least 9.1179 EUR, fees about 0.0449 USD. Say confirm, or tap the card.",
   "title": "Swap 10 USD for about 9.21 EUR?",
 }
 `;

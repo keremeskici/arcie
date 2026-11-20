@@ -28,7 +28,7 @@ describe("REST API", () => {
   const coingecko = { USDC: 0.9998, EURC: 1.08, cirBTC: 67000 } as const;
 
   it("GET /balances prices every token from CoinGecko when a key is configured", async () => {
-    const { call, kit } = await testApp({ tokenUsdPrice: async (t) => coingecko[t] });
+    const { call, kit, harness } = await testApp({ tokenUsdPrice: async (t) => coingecko[t] });
     kit.setBalance(DEMO_WALLET, "cirBTC", "0.01");
     const body = await (await call("GET", "/balances")).json();
     expect(body.chains[0].tokens).toEqual([
@@ -37,6 +37,8 @@ describe("REST API", () => {
       { token: "cirBTC", amount: "0.01", usd: 670, usdPrice: 67000 },
     ]);
     expect(body.totalUsd).toBe(791.58);
+    const voice = await harness.runTool({ userId: "demo", sessionId: "voice", channel: "voice", userTurn: 1, now: () => new Date(), runId: "balance" }, "get_balances", {});
+    expect(voice).toEqual({ summary: "Your wallet balance is $791.58.", data: { totalUsd: body.totalUsd } });
   });
 
   it("GET /balances shows a price even with a zero balance", async () => {
@@ -167,6 +169,16 @@ describe("REST API", () => {
     expect(harness.intents.listForUser("demo", 10)).toHaveLength(0);
   });
 
+  it("prices a custom slippage limit and rejects a limit looser than the wallet allows", async () => {
+    const { call, harness } = await testApp();
+    const quote = (maxSlippageBps: number) =>
+      call("POST", "/quotes/swap", { tokenIn: "USDC", tokenOut: "EURC", amountIn: "10", maxSlippageBps }, S);
+    expect(await (await quote(50)).json()).toMatchObject({ data: { estimatedOut: "9.2", minOut: "9.154", slippageBps: 50 } });
+    expect(await (await quote(0)).json()).toMatchObject({ data: { minOut: "9.2", slippageBps: 0 } });
+    expect((await quote(101)).status).toBe(400);
+    expect(harness.intents.listForUser("demo", 1)).toHaveLength(0);
+  });
+
   it("POST /receive publishes a receive island for the user's wallet", async () => {
     const { call } = await testApp();
     const r = await call("POST", "/receive", {}, S);
@@ -223,7 +235,7 @@ describe("shared proposal validation (F7)", () => {
 
   it.each([
     { kind: "send", params: { to: "Bob", amount: "5" }, title: "Send 5 USD to Bob?" },
-    { kind: "earn_deposit", params: { amount: "5" }, title: "Put 5 USD into Fake High Yield USDC?" },
+    { kind: "earn_deposit", params: { amount: "5" }, title: "Add 5 USD to savings?" },
   ])("applies the same defaults for $kind through REST", async ({ title, ...body }) => {
     const { call } = await testApp();
     const result = await call("POST", "/intents", body, S);

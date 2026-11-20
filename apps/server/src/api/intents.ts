@@ -1,4 +1,6 @@
+import { savedReview } from "@arcie/harness";
 import { ArcieError, type ActionKind } from "@arcie/core";
+import { refreshIntentStatus } from "../reconcile.js";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AppDeps } from "../app.js";
@@ -9,9 +11,22 @@ const proposeBody = z.object({
   params: z.record(z.string(), z.unknown()),
 });
 
+const currency = z.enum(["USDC", "EURC", "cirBTC"]);
+const screenSwapBody = z.strictObject({
+  requestId: z.uuid(), tokenIn: currency, tokenOut: currency,
+  amountIn: z.string().min(1).max(80), minOut: z.string().min(1).max(80),
+});
+
 /** Tapped actions go through exactly the same harness as voice. */
 export function intentRoutes(deps: AppDeps) {
   const app = new Hono();
+
+  app.post("/swaps", async (c) => {
+    const ctx = await screenCtx(deps, c);
+    const parsed = screenSwapBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: { code: "INVALID_ARGS", message: "Check the currencies, amount and quote." } }, 400);
+    return c.json(await deps.harness.screenSwap(ctx, parsed.data));
+  });
 
   app.post("/intents", async (c) => {
     const parsed = proposeBody.safeParse(await c.req.json().catch(() => null));
@@ -25,18 +40,24 @@ export function intentRoutes(deps: AppDeps) {
 
   app.get("/intents/:id", async (c) => {
     const ctx = await screenCtx(deps, c);
-    const i = deps.harness.intents.get(c.req.param("id"));
-    if (!i || i.userId !== ctx.userId) throw new ArcieError("NOT_FOUND");
+    const id = c.req.param("id");
+    const stored = deps.harness.intents.get(id);
+    if (!stored || stored.userId !== ctx.userId) throw new ArcieError("NOT_FOUND");
+    const i = await refreshIntentStatus(deps, stored);
+    const expired = i.status === "awaiting_confirmation" && i.expiresAt !== null && i.expiresAt <= ctx.now().toISOString();
+    const status = expired ? "expired" : i.status;
+    const canReview = status === "awaiting_confirmation" && i.sessionId === ctx.sessionId;
     return c.json({
       id: i.id,
       kind: i.kind,
-      status: i.status,
+      status,
+      canReview,
       statusReason: i.statusReason,
       txHash: i.txHash,
       expiresAt: i.expiresAt,
       island: i.status === "succeeded" || i.status === "failed"
         ? i.preview?.receipt ?? null
-        : i.status === "awaiting_confirmation" ? i.preview?.island ?? null : null,
+        : canReview ? savedReview(i) : null,
       error: i.error,
     });
   });

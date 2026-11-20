@@ -312,6 +312,16 @@ const HTML = `<!DOCTYPE html>
       color: #333;
     }
 
+    #send-contacts-dialog { width: min(400px, calc(100% - 24px)); max-height: 75vh; padding: 16px; border: 1px solid #ccc; border-radius: 8px; }
+    #send-contacts-dialog::backdrop { background: #0006; }
+    #send-contact-list { padding: 0; list-style: none; }
+    #send-contact-list button { display: block; width: 100%; margin-bottom: 4px; text-align: left; }
+    #send-contact-list small { display: block; overflow-wrap: anywhere; }
+    #btn-retry-send-contacts[hidden], #btn-retry-send-amount[hidden] { display: none; }
+    .send-review h4, .send-review .kv-list strong { min-width: 0; overflow-wrap: anywhere; }
+    #send-max-status, #send-review-status { margin-top: 6px; font-size: 12px; }
+    #btn-send-all[aria-pressed="true"] { color: #fff; background: #333; }
+
     /* Chat History */
     .chat-box {
       border: 1px solid #ddd;
@@ -408,7 +418,7 @@ const HTML = `<!DOCTYPE html>
         <button type="button" class="tab-btn active" data-tab="overview">1. Overview &amp; Balances</button>
         <button type="button" class="tab-btn" data-tab="send">2. Send &amp; Receive</button>
         <button type="button" class="tab-btn" data-tab="swap">3. Swap</button>
-        <button type="button" class="tab-btn" data-tab="earn">4. Earn Vaults</button>
+        <button type="button" class="tab-btn" data-tab="earn">4. Savings</button>
         <button type="button" class="tab-btn" data-tab="onramp">5. Add Money (Onramp)</button>
         <button type="button" class="tab-btn" data-tab="contacts">6. Contacts</button>
         <button type="button" class="tab-btn" data-tab="activity">7. Activity &amp; Session</button>
@@ -471,7 +481,7 @@ const HTML = `<!DOCTYPE html>
           <div class="btn-row">
             <button type="button" onclick="window.switchTab('send')">Send Money →</button>
             <button type="button" onclick="window.switchTab('swap')">Swap Tokens →</button>
-            <button type="button" onclick="window.switchTab('earn')">Invest in Vault →</button>
+            <button type="button" onclick="window.switchTab('earn')">Savings →</button>
             <button type="button" onclick="window.switchTab('onramp')">Add Money (Onramp) →</button>
             <button type="button" onclick="window.switchTab('contacts')">Manage Contacts →</button>
           </div>
@@ -482,24 +492,14 @@ const HTML = `<!DOCTYPE html>
       <div class="subscreen" id="tab-send">
         <div class="grid-2">
           <div class="card">
-            <div class="card-header">
-              <div>
-                <h2 class="card-title">Send Money</h2>
-                <div class="card-subtitle">Proposes a <code>send</code> intent (<code>POST /intents</code>)</div>
-              </div>
-            </div>
-            <div class="form-row">
-              <label for="send-to">Recipient (Contact name, Contact ID, or checksummed 0x address)</label>
-              <input id="send-to" type="text" value="Bob" placeholder="Bob, Alice, or 0x..." />
-              <div class="btn-row" style="margin-top: 6px;" id="send-contact-pills"></div>
-            </div>
+            <div class="card-header"><h2 class="card-title">Send money</h2></div>
             <div class="grid-2">
               <div class="form-row">
-                <label for="send-amount">Amount (number or "all")</label>
-                <input id="send-amount" type="text" value="1" />
+                <label for="send-amount">Amount</label>
+                <input id="send-amount" type="text" inputmode="decimal" placeholder="0" />
               </div>
               <div class="form-row">
-                <label for="send-token">Token</label>
+                <label for="send-token">Currency</label>
                 <select id="send-token">
                   <option value="USDC">USDC</option>
                   <option value="EURC">EURC</option>
@@ -508,8 +508,18 @@ const HTML = `<!DOCTYPE html>
               </div>
             </div>
             <div class="btn-row">
-              <button id="btn-propose-send" class="btn-primary" type="button">Propose Send (Open Confirm Card)</button>
-              <button type="button" class="btn-sm" onclick="document.getElementById('send-amount').value='all'">Set "all"</button>
+              <button id="btn-send-all" type="button" aria-pressed="false">Send all</button>
+              <button id="btn-retry-send-amount" type="button" hidden>Retry amount</button>
+            </div>
+            <div id="send-max-status" role="status" aria-live="polite"></div>
+            <div class="form-row" style="margin-top: 12px;">
+              <label for="send-to">To</label>
+              <input id="send-to" type="text" placeholder="Wallet address or contact name" autocomplete="off" />
+              <small id="send-address" class="mono" style="overflow-wrap:anywhere"></small>
+            </div>
+            <div class="btn-row">
+              <button id="btn-send-contacts" type="button" aria-haspopup="dialog">Contacts</button>
+              <button id="btn-propose-send" class="btn-primary" type="button" disabled>Review</button>
             </div>
           </div>
 
@@ -534,7 +544,7 @@ const HTML = `<!DOCTYPE html>
           <div class="card-header">
             <div>
               <h2 class="card-title">Swap Tokens</h2>
-              <div class="card-subtitle">Check a live price quote (<code>POST /quotes/swap</code>) or propose a swap (<code>POST /intents</code>)</div>
+              <div class="card-subtitle">Live prices update while this tab is open. Swap approves the displayed minimum.</div>
             </div>
           </div>
           <div class="grid-2">
@@ -555,96 +565,48 @@ const HTML = `<!DOCTYPE html>
               </select>
             </div>
           </div>
-          <div class="grid-2">
-            <div class="form-row">
-              <label for="swap-amount">Amount In</label>
-              <input id="swap-amount" type="text" value="2" />
-            </div>
-            <div class="form-row">
-              <label for="swap-slippage">Max Slippage (bps, optional — default 100 = 1%)</label>
-              <input id="swap-slippage" type="text" placeholder="100" />
-            </div>
+          <div class="form-row">
+            <label for="swap-amount">Amount In</label>
+            <input id="swap-amount" type="text" inputmode="decimal" maxlength="80" value="2" />
           </div>
+          <div id="out-swap-quote" style="margin: 12px 0;"></div>
           <div class="btn-row">
-            <button id="btn-quote-swap" type="button">Get Price Quote Only</button>
-            <button id="btn-propose-swap" class="btn-primary" type="button">Propose Swap (Open Confirm Card)</button>
+            <button id="btn-swap" class="btn-primary" type="button" disabled>Swap</button>
           </div>
-          <div id="out-swap-quote" style="margin-top: 12px;"></div>
+          <p id="out-swap-status" role="status"></p>
         </div>
       </div>
 
-      <!-- SUBSCREEN 4: EARN VAULTS -->
+      <!-- SUBSCREEN 4: SAVINGS -->
       <div class="subscreen" id="tab-earn">
         <div class="card">
           <div class="card-header">
-            <div>
-              <h2 class="card-title">Available Earning Vaults &amp; Your Positions</h2>
-              <div class="card-subtitle">Live Circle EarnKit vaults on Arc Testnet (<code>GET /vaults</code>)</div>
-            </div>
-            <button id="btn-refresh-vaults" class="btn-sm" type="button">Refresh Vaults</button>
-          </div>
-
-          <h3 style="font-size: 13px; margin: 8px 0;">Available Vaults</h3>
-          <table>
-            <thead>
-              <tr>
-                <th>Vault Name</th>
-                <th>Asset</th>
-                <th>APY</th>
-                <th>Address</th>
-                <th>Select</th>
-              </tr>
-            </thead>
-            <tbody id="tbl-vaults">
-              <tr><td colspan="5" class="empty-state">Loading vaults...</td></tr>
-            </tbody>
-          </table>
-
-          <h3 style="font-size: 13px; margin: 16px 0 8px 0;">Your Active Vault Positions</h3>
-          <table>
-            <thead>
-              <tr>
-                <th>Vault</th>
-                <th>Balance</th>
-                <th>APY</th>
-                <th>Yield Earned</th>
-                <th>Quick Withdraw</th>
-              </tr>
-            </thead>
-            <tbody id="tbl-positions">
-              <tr><td colspan="5" class="empty-state">Loading positions...</td></tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div class="card">
-          <div class="card-header">
-            <div>
-              <h2 class="card-title">Deposit or Withdraw</h2>
-              <div class="card-subtitle">Proposes <code>earn_deposit</code> or <code>earn_withdraw</code> (<code>POST /intents</code>)</div>
-            </div>
+            <h2 class="card-title">Savings</h2>
+            <button id="btn-refresh-savings" class="btn-sm" type="button">Refresh savings</button>
           </div>
           <div class="grid-3">
-            <div class="form-row">
-              <label for="earn-vault">Vault ("best", name, or 0x address)</label>
-              <input id="earn-vault" type="text" value="best" />
+            <div class="stat-box">
+              <div class="stat-label">Savings balance</div>
+              <div class="stat-value" id="savings-balance">—</div>
             </div>
-            <div class="form-row">
-              <label for="earn-amount">Amount (or "all" for withdraw)</label>
-              <input id="earn-amount" type="text" value="1" />
+            <div class="stat-box">
+              <div class="stat-label">Variable annual rate</div>
+              <div class="stat-value" id="savings-rate">—</div>
             </div>
-            <div class="form-row">
-              <label for="earn-token">Token (for deposit)</label>
-              <select id="earn-token">
-                <option value="USDC">USDC</option>
-                <option value="EURC">EURC</option>
-              </select>
+            <div class="stat-box">
+              <div class="stat-label">Earnings</div>
+              <div class="stat-value" id="savings-earned">—</div>
             </div>
           </div>
+          <p id="savings-status" role="status">Loading savings…</p>
+          <div class="form-row" style="margin-top: 14px;">
+            <label for="savings-amount">Amount (USD)</label>
+            <input id="savings-amount" type="text" inputmode="decimal" placeholder="0.00" />
+          </div>
           <div class="btn-row">
-            <button id="btn-propose-deposit" class="btn-primary" type="button">Propose Deposit</button>
-            <button id="btn-propose-withdraw" type="button">Propose Withdraw</button>
-            <button type="button" class="btn-sm" onclick="document.getElementById('earn-amount').value='all'">Set "all"</button>
+            <button id="savings-deposit" class="btn-primary" type="button" disabled>Review deposit</button>
+            <button id="savings-withdraw" type="button" disabled>Review withdrawal</button>
+            <button id="savings-withdraw-all" type="button" disabled>Review full withdrawal</button>
           </div>
         </div>
       </div>
@@ -660,14 +622,14 @@ const HTML = `<!DOCTYPE html>
           </div>
           <div class="grid-2">
             <div class="form-row">
-              <label for="onramp-amount">Amount to spend (optional, USD for USDC / EUR for EURC)</label>
+              <label for="onramp-amount">Amount to spend</label>
               <input id="onramp-amount" type="text" value="20" />
             </div>
             <div class="form-row">
-              <label for="onramp-token">Token</label>
+              <label for="onramp-token">Currency</label>
               <select id="onramp-token">
-                <option value="USDC">USDC</option>
-                <option value="EURC">EURC</option>
+                <option value="USDC">USD (USDC)</option>
+                <option value="EURC">EUR (EURC)</option>
               </select>
             </div>
           </div>
@@ -848,6 +810,16 @@ const HTML = `<!DOCTYPE html>
 
   </main>
 
+  <dialog id="send-contacts-dialog" aria-labelledby="send-contacts-title">
+    <div class="card-header">
+      <h2 id="send-contacts-title" class="card-title">Choose contact</h2>
+      <button id="btn-close-send-contacts" type="button" autofocus>Close</button>
+    </div>
+    <p id="send-contacts-status" role="status"></p>
+    <button id="btn-retry-send-contacts" type="button" hidden>Retry contacts</button>
+    <ul id="send-contact-list"></ul>
+  </dialog>
+
   <dialog id="onramp-dialog" aria-labelledby="onramp-title" aria-describedby="onramp-guidance">
     <div class="card-header">
       <div>
@@ -876,6 +848,7 @@ const HTML = `<!DOCTYPE html>
       document.querySelectorAll(".subscreen").forEach((s) => {
         s.classList.toggle("active", s.id === "tab-" + tabId);
       });
+      syncSwap();
     }
     window.switchTab = switchTab;
     document.querySelectorAll(".tab-btn").forEach((btn) => {
@@ -891,6 +864,7 @@ const HTML = `<!DOCTYPE html>
     let es = null;
     let chatMessages = [];
     let currentOpenIntentId = null;
+    let currentOpenChoiceId = null;
     let activeVoiceConversation = null;
 
     $("inp-session-id").value = "ui-" + Math.random().toString(36).slice(2, 10);
@@ -914,22 +888,23 @@ const HTML = `<!DOCTYPE html>
       return h;
     }
 
-    async function api(method, path, body) {
+    async function api(method, path, body, signal) {
       try {
         const res = await fetch(path, {
           method,
           headers: headers(),
+          signal,
           ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           const errMsg = data?.error?.message || ("HTTP " + res.status);
-          logStatus(method + " " + path + " FAILED (" + (data?.error?.code || res.status) + ")", errMsg);
+          if (!signal?.aborted) logStatus(method + " " + path + " FAILED (" + (data?.error?.code || res.status) + ")", errMsg);
           return { ok: false, status: res.status, data };
         }
         return { ok: true, status: res.status, data };
       } catch (e) {
-        logStatus(method + " " + path + " NETWORK ERROR", String(e?.message || e));
+        if (!signal?.aborted) logStatus(method + " " + path + " NETWORK ERROR", String(e?.message || e));
         return { ok: false, status: 0, data: { error: String(e) } };
       }
     }
@@ -973,40 +948,63 @@ const HTML = `<!DOCTYPE html>
         return;
       }
       if (island.kind === "dismiss") {
-        if (currentOpenIntentId === island.intentId) currentOpenIntentId = null;
+        if (currentOpenIntentId !== island.intentId) return;
+        currentOpenIntentId = null;
         $("island-active").innerHTML = "<div class='empty-state'>Card " + escapeHtml(island.intentId.slice(0, 8)) + " dismissed (" + escapeHtml(island.reason) + ").</div>";
         return;
       }
+      if (island.kind === "dismiss_choice") {
+        if (currentOpenChoiceId !== island.choiceId) return;
+        currentOpenChoiceId = null;
+        $("island-active").innerHTML = "<div class='empty-state'>Contact choice closed.</div>";
+        return;
+      }
       if (island.kind === "confirm") {
+        currentOpenChoiceId = null;
         currentOpenIntentId = island.intentId;
         $("inp-intent-id").value = island.intentId;
+        const send = island.action ? island.action === "send" : island.chips?.[0] === "Send";
+        const details = send && island.send;
+        const title = details ? "Send " + details.amount + " " + details.token + " to " + details.recipient : island.title;
         const chipsHtml = (island.chips || []).map((c) => "<span class='chip'>" + escapeHtml(c) + "</span>").join("");
-        const rowsHtml = (island.rows || [])
-          .map((r) => "<li><span>" + escapeHtml(r.label) + (r.estimate ? " (est.)" : "") + "</span><strong>" + escapeHtml(r.value === null ? "—" : r.value) + "</strong></li>")
-          .join("");
-        const adjHtml = (island.adjustments || []).map((a) => "<li><strong>Adjustment:</strong> " + escapeHtml(a) + "</li>").join("");
-        const riskHtml = (island.risks || []).map((r) => "<li><strong>Risk:</strong> " + escapeHtml(r) + "</li>").join("");
+        const rows = (island.rows || []).map(r => details && r.label === "Amount" ? { ...r, value: details.amount + " " + details.token } : r);
+        if (details?.address) rows.push({ label: "Address", value: details.address });
+        const rowsHtml = rows.map((r) => "<li><span>" + escapeHtml(r.label) + (r.estimate ? " (est.)" : "") + "</span><strong>" + escapeHtml(r.value === null ? "—" : r.value) + "</strong></li>").join("");
+        const adjHtml = (island.adjustments || []).map((a) => "<li>" + (send ? "" : "<strong>Adjustment:</strong> ") + escapeHtml(a) + "</li>").join("");
+        const risks = (island.risks || []).filter(r => !send || r !== "Onchain transfers can't be reversed.");
+        const riskHtml = risks.map((r) => "<li>" + (send ? "" : "<strong>Risk:</strong> ") + escapeHtml(r) + "</li>").join("");
         const discText = (island.disclosure || []).map((d) => (d.bold ? "<strong>" + escapeHtml(d.text) + "</strong>" : escapeHtml(d.text))).join("");
         $("island-active").innerHTML =
-          "<div class='island-box'>" +
-          "<div class='chip-row'>" + chipsHtml + "</div>" +
-          "<h4>" + escapeHtml(island.title) + "</h4>" +
-          "<p style='margin: 6px 0; font-size: 13px;'>" + discText + "</p>" +
+          "<div class='island-box" + (send ? " send-review" : "") + "'>" +
+          (send ? "" : "<div class='chip-row'>" + chipsHtml + "</div>") +
+          "<h4>" + escapeHtml(title) + "</h4>" +
+          (send ? "" : "<p style='margin: 6px 0; font-size: 13px;'>" + discText + "</p>") +
           "<ul class='kv-list'>" + rowsHtml + "</ul>" +
           (adjHtml || riskHtml ? "<ul class='notice-list'>" + adjHtml + riskHtml + "</ul>" : "") +
           "<div class='btn-row' style='margin-top: 12px;'>" +
-          "<button type='button' class='btn-primary' id='btn-card-confirm'>Confirm Transaction</button>" +
-          "<button type='button' id='btn-card-cancel'>Cancel</button>" +
-          "</div>" +
-          "<div style='margin-top: 8px; font-size: 11px; color: #555;'>" +
-          "<div>Confirm = " + escapeHtml(island.buttons?.confirm || "") + "</div>" +
-          "<div>Expires: " + escapeHtml(island.expiresAt) + "</div>" +
-          "</div></div>";
-        $("btn-card-confirm").onclick = () => confirmIntent(island.intentId);
+          "<button type='button' class='btn-primary' id='btn-card-confirm'>" + (send ? "Confirm" : "Confirm Transaction") + "</button>" +
+          "<button type='button' id='btn-card-cancel'>Cancel</button></div>" +
+          (send ? "<div id='send-review-status' role='status'></div>" :
+            "<div style='margin-top: 8px; font-size: 11px; color: #555;'><div>Confirm = " + escapeHtml(island.buttons?.confirm || "") + "</div><div>Expires: " + escapeHtml(island.expiresAt) + "</div></div>") +
+          "</div>";
+        const confirm = $("btn-card-confirm");
+        if (send) {
+          const expires = Date.parse(island.expiresAt);
+          function expired() {
+            if (Date.now() < expires) return false;
+            confirm.disabled = true;
+            if (confirm.isConnected) $("send-review-status").textContent = "This request expired. Prepare a new send.";
+            return true;
+          }
+          if (!expired()) setTimeout(() => { if (confirm.isConnected && !confirm.disabled) expired(); }, expires - Date.now() + 1);
+          confirm.onclick = () => { if (!expired()) confirmIntent(island.intentId, expires); };
+        } else confirm.onclick = () => confirmIntent(island.intentId);
         $("btn-card-cancel").onclick = () => cancelIntent(island.intentId);
         return;
       }
       if (island.kind === "choice") {
+        currentOpenChoiceId = island.choiceId;
+        currentOpenIntentId = null;
         const optsHtml = (island.options || [])
           .map((o) => "<button type='button' data-opt='" + escapeHtml(o.id) + "'>" + escapeHtml(o.label) + (o.detail ? " (" + escapeHtml(o.detail) + ")" : "") + "</button>")
           .join("");
@@ -1014,13 +1012,21 @@ const HTML = `<!DOCTYPE html>
           "<div class='island-box'>" +
           "<h4>" + escapeHtml(island.question) + "</h4>" +
           "<div class='btn-row' id='choice-opts'>" + optsHtml + "</div>" +
+          "<button type='button' id='btn-cancel-choice'>Cancel</button>" +
           "</div>";
         $("choice-opts").querySelectorAll("button").forEach((btn) => {
           btn.onclick = () => answerChoice(island.choiceId, btn.getAttribute("data-opt"));
         });
+        $("btn-cancel-choice").onclick = async () => {
+          const result = await api("DELETE", "/choices/" + encodeURIComponent(island.choiceId));
+          if (result.ok) renderIsland({ kind: "dismiss_choice", choiceId: island.choiceId });
+        };
         return;
       }
       if (island.kind === "receipt") {
+        if (island.intentId === pendingSwap?.body.requestId) {
+          finishSwap(island.status === "succeeded" ? "Swap complete." : island.error?.message || "Swap failed.", island.status === "succeeded");
+        }
         if (currentOpenIntentId === island.intentId) {
           currentOpenIntentId = null;
           $("island-active").innerHTML = "<div class='empty-state'>Confirmation completed. Receipt shown below.</div>";
@@ -1109,69 +1115,71 @@ const HTML = `<!DOCTYPE html>
       $("tbl-balances").querySelectorAll("button[data-qsend]").forEach((btn) => {
         btn.onclick = () => {
           $("send-token").value = btn.getAttribute("data-qsend");
+          refreshSendAmount();
           switchTab("send");
         };
       });
       $("tbl-balances").querySelectorAll("button[data-qswap]").forEach((btn) => {
         btn.onclick = () => {
-          $("swap-in").value = btn.getAttribute("data-qswap");
+          if (!pendingSwap) {
+            $("swap-in").value = btn.getAttribute("data-qswap");
+            if ($("swap-out").value === $("swap-in").value) $("swap-out").value = $("swap-in").value === "USDC" ? "EURC" : "USDC";
+          }
           switchTab("swap");
         };
       });
     }
 
-    async function refreshVaults() {
-      const r = await api("GET", "/vaults");
-      if (!r.ok) return;
-      const vaults = r.data.vaults || [];
-      const positions = r.data.positions || [];
+    const savingsDollars = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+    const savingsRate = new Intl.NumberFormat("en-US", { style: "percent", maximumFractionDigits: 2 });
+    let savingsAccount = null;
+    let savingsRequest = 0;
+    let preparingSavings = false;
 
-      $("tbl-vaults").innerHTML = vaults.length
-        ? vaults
-            .map(
-              (v) =>
-                "<tr>" +
-                "<td><strong>" + escapeHtml(v.name) + "</strong></td>" +
-                "<td>" + escapeHtml(v.token) + "</td>" +
-                "<td>" + (Number(v.apy) * 100).toFixed(2) + "%</td>" +
-                "<td class='mono'>" + escapeHtml(v.address.slice(0, 10)) + "…</td>" +
-                "<td><button type='button' class='btn-sm' data-vault='" + escapeHtml(v.address) + "' data-token='" + escapeHtml(v.token) + "'>Use Vault</button></td>" +
-                "</tr>"
-            )
-            .join("")
-        : "<tr><td colspan='5' class='empty-state'>No active vaults available.</td></tr>";
+    function formatSavingsDollars(value) {
+      if (value == null || !Number.isFinite(Number(value))) return "—";
+      const n = Number(value);
+      if (n > 0 && n < 0.01) return "Less than 1¢";
+      if (n < 0 && n > -0.01) return "Loss under 1¢";
+      return savingsDollars.format(n);
+    }
 
-      $("tbl-vaults").querySelectorAll("button[data-vault]").forEach((btn) => {
-        btn.onclick = () => {
-          $("earn-vault").value = btn.getAttribute("data-vault");
-          const tok = btn.getAttribute("data-token");
-          if (tok === "USDC" || tok === "EURC") $("earn-token").value = tok;
-        };
-      });
+    function updateSavingsButtons() {
+      const amount = $("savings-amount").value.trim();
+      const available = savingsAccount?.available && !preparingSavings;
+      const valid = /^(?:0|[1-9][0-9]*)(?:[.][0-9]{1,6})?$/.test(amount) && Number(amount) > 0 && Number.isFinite(Number(amount));
+      const balance = savingsAccount?.balance == null ? null : Number(savingsAccount.balance);
+      $("savings-deposit").disabled = !available || !valid;
+      $("savings-withdraw").disabled = !available || !valid || balance === null || Number(amount) > balance;
+      $("savings-withdraw-all").disabled = !available || !(balance > 0);
+    }
 
-      $("tbl-positions").innerHTML = positions.length
-        ? positions
-            .map(
-              (p) =>
-                "<tr>" +
-                "<td><strong>" + escapeHtml(p.vaultName) + "</strong></td>" +
-                "<td class='mono'>" + escapeHtml(p.currentBalance) + " " + escapeHtml(p.token) + "</td>" +
-                "<td>" + (Number(p.apy) * 100).toFixed(2) + "%</td>" +
-                "<td class='mono'>" + escapeHtml(p.yieldEarned ?? "—") + "</td>" +
-                "<td><button type='button' class='btn-sm' data-wvault='" + escapeHtml(p.vault) + "'>Withdraw All</button></td>" +
-                "</tr>"
-            )
-            .join("")
-        : "<tr><td colspan='5' class='empty-state'>No active vault investments yet.</td></tr>";
+    async function refreshSavings() {
+      const current = ++savingsRequest;
+      savingsAccount = null;
+      updateSavingsButtons();
+      $("savings-status").textContent = "Loading savings…";
+      const r = await api("GET", "/savings");
+      if (current !== savingsRequest) return;
+      savingsAccount = r.ok ? r.data : null;
+      $("savings-balance").textContent = formatSavingsDollars(savingsAccount?.balance);
+      $("savings-earned").textContent = formatSavingsDollars(savingsAccount?.earned);
+      $("savings-rate").textContent = Number.isFinite(savingsAccount?.annualRate) ? savingsRate.format(savingsAccount.annualRate) : "—";
+      $("savings-status").textContent = savingsAccount?.available ? "" : "Savings unavailable. Refresh to try again.";
+      updateSavingsButtons();
+    }
 
-      $("tbl-positions").querySelectorAll("button[data-wvault]").forEach((btn) => {
-        btn.onclick = () => {
-          const v = btn.getAttribute("data-wvault");
-          $("earn-vault").value = v;
-          $("earn-amount").value = "all";
-          propose("earn_withdraw", { vault: v, amount: "all" });
-        };
-      });
+    async function reviewSavings(kind, all = false) {
+      if (!savingsAccount?.available || preparingSavings) return;
+      const amount = all ? "all" : $("savings-amount").value.trim();
+      preparingSavings = true;
+      updateSavingsButtons();
+      try {
+        await propose(kind, { vault: "savings", amount }, "Preparing your savings review…");
+      } finally {
+        preparingSavings = false;
+        updateSavingsButtons();
+      }
     }
 
     async function refreshContacts() {
@@ -1181,29 +1189,20 @@ const HTML = `<!DOCTYPE html>
       $("tbl-contacts").innerHTML = list.length
         ? list
             .map(
-              (c) =>
+              (c, index) =>
                 "<tr>" +
                 "<td><strong>" + escapeHtml(c.name) + "</strong></td>" +
                 "<td class='mono'>" + escapeHtml(c.address) + "</td>" +
-                "<td><button type='button' class='btn-sm' data-cname='" + escapeHtml(c.name) + "'>Send to " + escapeHtml(c.name) + "</button></td>" +
+                "<td><button type='button' class='btn-sm' data-contact-index='" + index + "'>Send to " + escapeHtml(c.name) + "</button></td>" +
                 "</tr>"
             )
             .join("")
         : "<tr><td colspan='3' class='empty-state'>No contacts saved yet.</td></tr>";
 
-      $("tbl-contacts").querySelectorAll("button[data-cname]").forEach((btn) => {
+      $("tbl-contacts").querySelectorAll("button[data-contact-index]").forEach((btn) => {
         btn.onclick = () => {
-          $("send-to").value = btn.getAttribute("data-cname");
+          pickSendContact(list[Number(btn.dataset.contactIndex)]);
           switchTab("send");
-        };
-      });
-
-      $("send-contact-pills").innerHTML = list
-        .map((c) => "<button type='button' class='btn-sm' data-pill='" + escapeHtml(c.name) + "'>Pick: " + escapeHtml(c.name) + "</button>")
-        .join("");
-      $("send-contact-pills").querySelectorAll("button[data-pill]").forEach((btn) => {
-        btn.onclick = () => {
-          $("send-to").value = btn.getAttribute("data-pill");
         };
       });
     }
@@ -1238,12 +1237,13 @@ const HTML = `<!DOCTYPE html>
     }
 
     async function refreshAll() {
-      await Promise.all([refreshMe(), refreshBalances(), refreshVaults(), refreshContacts(), refreshActivity()]);
+      await Promise.all([refreshMe(), refreshBalances(), refreshSavings(), refreshContacts(), refreshActivity()]);
     }
 
     // --- Intent Actions ---
-    async function propose(kind, params) {
-      logStatus("Proposing " + kind + "...", params);
+    async function propose(kind, params, status) {
+      if (status) logStatus(status);
+      else logStatus("Proposing " + kind + "...", params);
       const r = await api("POST", "/intents", { kind, params });
       if (r.ok) {
         logStatus(r.data.summary || ("Proposed " + kind));
@@ -1252,7 +1252,7 @@ const HTML = `<!DOCTYPE html>
       }
     }
 
-    async function confirmIntent(id) {
+    async function confirmIntent(id, sendExpires) {
       const btn = $("btn-card-confirm");
       if (btn) {
         btn.disabled = true;
@@ -1269,9 +1269,10 @@ const HTML = `<!DOCTYPE html>
           } catch {}
         }
         await refreshAll();
-      } else if (btn) {
-        btn.disabled = false;
-        btn.textContent = "Confirm Transaction";
+      } else if (btn?.isConnected) {
+        btn.disabled = sendExpires !== undefined && Date.now() >= sendExpires;
+        btn.textContent = sendExpires !== undefined ? "Confirm" : "Confirm Transaction";
+        if (sendExpires !== undefined) $("send-review-status").textContent = r.data.error?.message || "Couldn't confirm this send.";
       }
     }
 
@@ -1291,11 +1292,8 @@ const HTML = `<!DOCTYPE html>
 
     async function answerChoice(choiceId, optionId) {
       logStatus("Answering choice " + choiceId + " -> " + optionId);
-      const r = await api("POST", "/choices/" + encodeURIComponent(choiceId), { optionId });
-      if (r.ok) {
-        $("send-to").value = optionId;
-        await propose("send", { to: optionId, amount: $("send-amount").value.trim(), token: $("send-token").value });
-      }
+      const r = await api("POST", "/choices/" + encodeURIComponent(choiceId), { optionId, prepare: true });
+      if (r.ok && r.data.island) renderIsland(r.data.island);
     }
 
     // --- Chat ---
@@ -1336,6 +1334,7 @@ const HTML = `<!DOCTYPE html>
     $("btn-reconnect-sse").onclick = connectSse;
     $("btn-clear-token").onclick = () => {
       $("inp-privy-token").value = "";
+      syncSwap();
       logStatus("Cleared Privy token.");
     };
     $("btn-onboard").onclick = async () => {
@@ -1350,6 +1349,7 @@ const HTML = `<!DOCTYPE html>
       const r = await api("POST", "/voice/session", {});
       if (r.ok && r.data.sessionId) {
         $("inp-session-id").value = r.data.sessionId;
+        syncSwap();
         logStatus("Minted voice session " + r.data.sessionId);
         connectSse();
       }
@@ -1369,54 +1369,268 @@ const HTML = `<!DOCTYPE html>
       triggerReceive();
     };
 
-    $("btn-propose-send").onclick = () =>
-      propose("send", {
-        to: $("send-to").value.trim(),
-        amount: $("send-amount").value.trim(),
-        token: $("send-token").value,
-      });
+    let selectedSendContact = null;
+    let sendAll = false;
+    let sendFeeChecked = false;
+    let sendRead = null;
+    let sendDebounce;
+    let sendPreparing = false;
+    const sendRecipient = () => selectedSendContact?.id || $("send-to").value.trim();
 
-    $("btn-quote-swap").onclick = async () => {
-      const body = {
-        tokenIn: $("swap-in").value,
-        tokenOut: $("swap-out").value,
-        amountIn: $("swap-amount").value.trim(),
-      };
-      logStatus("Checking swap quote...");
-      const r = await api("POST", "/quotes/swap", body);
+    function sendAmount() {
+      let value = $("send-amount").value.trim();
+      if (value.startsWith(".")) value = "0" + value;
+      const decimals = $("send-token").value === "cirBTC" ? 8 : 6;
+      return /^(0|[1-9][0-9]*)(?:\\.[0-9]+)?$/.test(value) && (value.split(".")[1]?.length || 0) <= decimals && Number(value) > 0 ? value : null;
+    }
+
+    function updateSendButton() {
+      $("btn-propose-send").disabled = sendPreparing || !sendRecipient() || !sendAmount() || (sendAll && !sendFeeChecked);
+      $("btn-send-all").setAttribute("aria-pressed", String(sendAll));
+    }
+
+    function refreshSendAmount(delay = 0) {
+      clearTimeout(sendDebounce);
+      sendRead?.abort();
+      sendFeeChecked = false;
+      $("btn-retry-send-amount").hidden = true;
+      $("send-max-status").textContent = "";
+      if (sendAll) {
+        $("send-amount").value = "";
+        $("send-max-status").textContent = "Calculating…";
+        const to = sendRecipient(), token = $("send-token").value;
+        const query = new URLSearchParams({ token });
+        if (to) query.set("to", to);
+        const read = new AbortController();
+        sendRead = read;
+        sendDebounce = setTimeout(async () => {
+          const result = await api("GET", "/quotes/send-max?" + query, undefined, read.signal);
+          if (read.signal.aborted) return;
+          if (result.ok) {
+            $("send-amount").value = result.data.amount;
+            sendFeeChecked = result.data.feeChecked;
+            $("send-max-status").textContent = to ? "" : token === "USDC" ? "Balance before the network fee." : "Choose a recipient to check the network fee.";
+          } else {
+            $("send-max-status").textContent = result.data.error?.message || "Couldn't calculate this amount.";
+            $("btn-retry-send-amount").hidden = false;
+          }
+          updateSendButton();
+        }, delay);
+      }
+      updateSendButton();
+    }
+
+    function pickSendContact(contact) {
+      selectedSendContact = contact;
+      $("send-to").value = contact.name;
+      $("send-address").textContent = contact.address;
+      refreshSendAmount();
+    }
+
+    let contactsRead;
+    async function loadSendContacts() {
+      contactsRead?.abort();
+      const read = new AbortController();
+      contactsRead = read;
+      const list = $("send-contact-list");
+      list.replaceChildren();
+      $("send-contacts-status").textContent = "Loading contacts…";
+      $("btn-retry-send-contacts").hidden = true;
+      const result = await api("GET", "/contacts", undefined, read.signal);
+      if (read.signal.aborted) return;
+      if (!result.ok) {
+        $("send-contacts-status").textContent = result.data.error?.message || "Couldn't load contacts.";
+        $("btn-retry-send-contacts").hidden = false;
+        return;
+      }
+      const contacts = result.data.contacts;
+      $("send-contacts-status").textContent = contacts.length ? "" : "No contacts yet. Enter a wallet address to send money.";
+      for (const c of contacts) {
+        const item = document.createElement("li"), button = document.createElement("button"), address = document.createElement("small");
+        button.type = "button";
+        button.setAttribute("aria-pressed", String(selectedSendContact?.id === c.id));
+        button.textContent = c.name;
+        address.textContent = c.address;
+        button.append(address);
+        button.onclick = () => { pickSendContact(c); $("send-contacts-dialog").close(); };
+        item.append(button);
+        list.append(item);
+      }
+    }
+
+    $("btn-send-contacts").onclick = () => { $("send-contacts-dialog").showModal(); loadSendContacts(); };
+    $("btn-close-send-contacts").onclick = () => $("send-contacts-dialog").close();
+    $("send-contacts-dialog").onclose = () => contactsRead?.abort();
+    $("btn-retry-send-contacts").onclick = loadSendContacts;
+    $("btn-retry-send-amount").onclick = () => refreshSendAmount();
+    $("btn-send-all").onclick = () => { sendAll = !sendAll; $("send-amount").value = ""; refreshSendAmount(); };
+    $("send-amount").oninput = () => { sendAll = false; refreshSendAmount(); };
+    $("send-to").oninput = () => { selectedSendContact = null; $("send-address").textContent = ""; refreshSendAmount(180); };
+    $("send-token").onchange = () => refreshSendAmount();
+    $("btn-propose-send").onclick = async () => {
+      if ($("btn-propose-send").disabled) return;
+      sendPreparing = true;
+      updateSendButton();
+      try { await propose("send", { to: sendRecipient(), amount: sendAll ? "all" : sendAmount(), token: $("send-token").value }); }
+      finally { sendPreparing = false; updateSendButton(); }
+    };
+
+    // Poll only for the visible Swap panel. Aborting also invalidates late responses.
+    let swapTimer;
+    let swapReads = new AbortController();
+    let swapQuote = null;
+    let pendingSwap = null;
+
+    function swapVisible() {
+      return !document.hidden && $("tab-swap").classList.contains("active");
+    }
+
+    function stopSwapReads() {
+      clearTimeout(swapTimer);
+      swapReads.abort();
+      swapReads = new AbortController();
+      swapQuote = null;
+      $("btn-swap").disabled = true;
+    }
+
+    function swapParams() {
+      return { tokenIn: $("swap-in").value, tokenOut: $("swap-out").value, amountIn: $("swap-amount").value.trim() };
+    }
+
+    function syncSwap() {
+      stopSwapReads();
+      const visible = swapVisible();
+      const signal = swapReads.signal;
+      const pending = pendingSwap;
+      if (pending && pending.owner !== JSON.stringify(headers())) {
+        finishSwap("Wallet or session changed. Check activity for your previous swap.", true);
+        return;
+      }
+      for (const id of ["swap-in", "swap-out", "swap-amount"]) $(id).disabled = !!pending;
+      $("btn-swap").textContent = pending?.retry ? "Retry swap" : "Swap";
+      if (pending) {
+        $("btn-swap").disabled = !visible || !pending.retry;
+        if (visible && !pending.submitting && !pending.retry) {
+          swapTimer = setTimeout(() => checkSwap(pending, signal), 2000);
+        }
+        return;
+      }
+
+      const params = swapParams();
+      const decimal = params.tokenIn === "cirBTC" ? /^(?:0|[1-9][0-9]*)(?:[.][0-9]{1,8})?$/ : /^(?:0|[1-9][0-9]*)(?:[.][0-9]{1,6})?$/;
+      if (!visible || params.amountIn.length > 80 || !decimal.test(params.amountIn) || !(Number(params.amountIn) > 0)) {
+        $("out-swap-quote").textContent = visible ? "Enter an amount to get a quote." : "";
+        return;
+      }
+      if (params.tokenIn === params.tokenOut) {
+        $("out-swap-quote").textContent = "Choose two different currencies.";
+        return;
+      }
+      $("out-swap-quote").textContent = "Getting a live quote…";
+      swapTimer = setTimeout(() => refreshQuote(params, signal), 500);
+    }
+
+    async function refreshQuote(params, signal) {
+      if (signal.aborted || !swapVisible()) return;
+      const r = await api("POST", "/quotes/swap", params, signal);
+      if (signal.aborted || !swapVisible()) return;
+      const { estimatedOut, minOut } = r.data.data || {};
+      if (r.ok && Number(minOut) > 0 && Number(estimatedOut) > 0) {
+        swapQuote = { ...params, minOut };
+        $("out-swap-quote").textContent = "Estimated output: " + estimatedOut + " " + params.tokenOut + " · Minimum received: " + minOut + " " + params.tokenOut;
+      } else {
+        swapQuote = null;
+        $("out-swap-quote").textContent = r.data.error?.message || "Quote unavailable.";
+      }
+      $("btn-swap").disabled = !swapQuote;
+      swapTimer = setTimeout(() => refreshQuote(params, signal), swapQuote ? 500 : 2000);
+    }
+
+    function finishSwap(message, clearAmount = false) {
+      pendingSwap = null;
+      $("out-swap-status").textContent = message;
+      if (clearAmount) $("swap-amount").value = "";
+      syncSwap();
+    }
+
+    function applySwapStatus(data) {
+      if (data.island?.kind === "receipt") {
+        renderIsland(data.island);
+      } else if (data.status === "requote" || data.statusReason === "price_changed") {
+        finishSwap("The price changed. Check the new estimate and tap Swap again.");
+      } else if (data.status === "failed" || data.status === "rejected") {
+        finishSwap(data.error?.message || data.summary || data.statusReason || "Swap failed.");
+      } else if (data.status === "succeeded") {
+        finishSwap("Swap complete.", true);
+        refreshAll();
+      } else {
+        $("out-swap-status").textContent = data.error?.message || data.summary || "Your swap is processing.";
+        syncSwap();
+      }
+    }
+
+    async function checkSwap(pending, signal) {
+      if (signal.aborted || !swapVisible()) return;
+      const r = await api("GET", "/intents/" + encodeURIComponent(pending.body.requestId), undefined, signal);
+      if (signal.aborted || pending !== pendingSwap || !swapVisible()) return;
       if (r.ok) {
-        logStatus(r.data.summary);
-        $("out-swap-quote").innerHTML =
-          "<div class='island-box'><h4>" + escapeHtml(r.data.summary) + "</h4>" +
-          "<ul class='kv-list'>" +
-          "<li><span>Estimated Out</span><strong>" + escapeHtml(r.data.data?.estimatedOut) + " " + escapeHtml(body.tokenOut) + "</strong></li>" +
-          "<li><span>Minimum Out (after slippage)</span><strong>" + escapeHtml(r.data.data?.minOut) + " " + escapeHtml(body.tokenOut) + "</strong></li>" +
-          "</ul></div>";
+        applySwapStatus(r.data);
+        return;
+      }
+      if (r.status === 404 && pending.unacknowledged) {
+        pending.retry = true;
+        $("out-swap-status").textContent = "Submission could not be confirmed. Retry the same swap.";
+      } else {
+        $("out-swap-status").textContent = "Waiting for a swap status update…";
+      }
+      syncSwap();
+    }
+
+    $("btn-swap").onclick = async () => {
+      if (!swapVisible() || $("btn-swap").disabled) return;
+      if (!pendingSwap) {
+        const params = swapParams();
+        if (!swapQuote || Object.keys(params).some(key => params[key] !== swapQuote[key])) return syncSwap();
+        pendingSwap = { body: { requestId: crypto.randomUUID(), ...swapQuote }, owner: JSON.stringify(headers()) };
+      }
+      const pending = pendingSwap;
+      if (pending.submitting || pending.owner !== JSON.stringify(headers())) return syncSwap();
+      pending.submitting = true;
+      pending.retry = false;
+      syncSwap();
+      $("out-swap-status").textContent = "Submitting your swap…";
+      const r = await api("POST", "/swaps", pending.body);
+      // A receipt can arrive over the event stream before the POST returns.
+      if (pending !== pendingSwap) return;
+      pending.submitting = false;
+      if (r.ok && r.data.intentId === pending.body.requestId) {
+        pending.unacknowledged = false;
+        applySwapStatus(r.data);
+      } else if (r.status >= 400 && r.status < 500 && r.status !== 408) {
+        finishSwap(r.data.error?.message || "Could not submit the swap.");
+      } else {
+        pending.unacknowledged = true;
+        $("out-swap-status").textContent = "Checking whether the swap was submitted…";
+        syncSwap();
       }
     };
+    function swapEdited() {
+      if (!pendingSwap) $("out-swap-status").textContent = "";
+      syncSwap();
+    }
+    $("swap-amount").oninput = swapEdited;
+    $("swap-in").onchange = swapEdited;
+    $("swap-out").onchange = swapEdited;
+    for (const id of ["inp-dev-user", "inp-privy-token", "inp-session-id"]) $(id).addEventListener("input", syncSwap);
+    document.onvisibilitychange = syncSwap;
+    window.onpagehide = stopSwapReads;
+    window.onpageshow = syncSwap;
 
-    $("btn-propose-swap").onclick = () => {
-      const slip = $("swap-slippage").value.trim();
-      propose("swap", {
-        tokenIn: $("swap-in").value,
-        tokenOut: $("swap-out").value,
-        amountIn: $("swap-amount").value.trim(),
-        ...(slip ? { maxSlippageBps: Number(slip) } : {}),
-      });
-    };
-
-    $("btn-refresh-vaults").onclick = refreshVaults;
-    $("btn-propose-deposit").onclick = () =>
-      propose("earn_deposit", {
-        vault: $("earn-vault").value.trim() || "best",
-        amount: $("earn-amount").value.trim(),
-        token: $("earn-token").value,
-      });
-    $("btn-propose-withdraw").onclick = () =>
-      propose("earn_withdraw", {
-        vault: $("earn-vault").value.trim() || "best",
-        amount: $("earn-amount").value.trim(),
-      });
+    $("btn-refresh-savings").onclick = refreshSavings;
+    $("savings-amount").oninput = updateSavingsButtons;
+    $("savings-deposit").onclick = () => reviewSavings("earn_deposit");
+    $("savings-withdraw").onclick = () => reviewSavings("earn_withdraw");
+    $("savings-withdraw-all").onclick = () => reviewSavings("earn_withdraw", true);
 
     const onramp = setupOnramp({
       mint: async (params) => {
@@ -1551,6 +1765,7 @@ const HTML = `<!DOCTYPE html>
             getAccessToken().then(async (tok) => {
               if (tok) {
                 $("inp-privy-token").value = tok;
+                syncSwap();
                 logStatus("Privy signed in (" + (user?.id || "user") + "). Running POST /auth/session...");
                 const r = await api("POST", "/auth/session", {});
                 if (r.ok) {
@@ -1578,6 +1793,7 @@ const HTML = `<!DOCTYPE html>
                         onramp.close();
                         await logout();
                         $("inp-privy-token").value = "";
+                        syncSwap();
                         logStatus("Logged out of Privy.");
                       },
                     },
