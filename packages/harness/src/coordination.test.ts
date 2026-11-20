@@ -218,7 +218,7 @@ describe("confirmation claims and fencing", () => {
     await gate.started;
     await b.h.cancel(ctx(), id);
     gate.release();
-    await pending.catch(() => undefined);
+    await expect(pending).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(swaps(a.kit, b.kit)).toHaveLength(0);
     expect((await dbA.select().from(intents).where(eq(intents.id, id)))[0]!.status).toBe("cancelled");
   });
@@ -273,5 +273,125 @@ describe("confirmation claims and fencing", () => {
     expect(second!.token).not.toBe(first!.token);
     expect(await repo.patchFenced("i1", first!, { preview: { x: 1 } })).toBe(false);
     expect(await repo.patchFenced("i1", second!, { preview: { x: 1 } })).toBe(true);
+  });
+});
+
+describe("execution fence", () => {
+  /** A third harness on A's pool whose limits lookup (after the claim and requote check) can be held open. */
+  async function heldInLimits() {
+    const s = await twoInstances();
+    const kit = new FakeAppKit();
+    kit.setBalance(W, "USDC", "100");
+    kit.setBalance(W, "EURC", "20");
+    const real = new DbPolicyProvider(s.dbA);
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const policy = { getLimits: async (u: string) => { entered(); await gate; return real.getLimits(u); } };
+    const h = createHarness({ db: s.dbA, kit, policy, bus: new EventBus() });
+    const p = await s.a.h.propose(s.ctx(), "send", { to: "Bob", amount: "5", token: "USDC" });
+    const id = (p.island as { intentId: string }).intentId;
+    // Attach a handler now so an early rejection is not reported as unhandled.
+    const outcome = h.confirm(s.ctx({ channel: "screen" }), id, "screen").then(() => null, (e: unknown) => e);
+    await started;
+    return { ...s, kit, id, release, outcome };
+  }
+  const sends = (...kits: FakeAppKit[]) => kits.flatMap((k) => k.calls.filter((c) => c.method === "send"));
+  const expireClaim = (db: Db, id: string) =>
+    db.execute(sql`update arcie.confirm_claims set expires_at = now() - interval '1 second' where intent_id = ${id}`);
+
+  it("refuses to execute when the card was revised after the claim", async () => {
+    const { dbA, a, b, kit, id, release, outcome } = await heldInLimits();
+    await new IntentRepo(dbA).patch(id, { preview: { revised: true } }); // another writer changed what the user saw
+    release();
+    expect(await outcome).toMatchObject({ code: "POLICY_DENIED" });
+    expect(sends(kit, a.kit, b.kit)).toHaveLength(0);
+    expect((await dbA.select().from(intents).where(eq(intents.id, id)))[0]!.status).toBe("awaiting_confirmation");
+  });
+
+  it("refuses to execute when the claim was taken over and the quote revised", async () => {
+    const { dbA, a, b, kit, id, release, outcome } = await heldInLimits();
+    await expireClaim(dbA, id);
+    const takeover = await claimConfirmation(dbA, id);
+    expect(takeover).not.toBeNull();
+    expect(await new IntentRepo(dbA).patchFenced(id, takeover!, { preview: { requoted: true } })).toBe(true);
+    release();
+    expect(await outcome).toMatchObject({ code: "POLICY_DENIED" });
+    expect(sends(kit, a.kit, b.kit)).toHaveLength(0);
+  });
+
+  it("refuses to execute when the claim expired and was taken over without a revision change", async () => {
+    const { dbA, a, b, kit, id, release, outcome } = await heldInLimits();
+    await expireClaim(dbA, id);
+    expect(await claimConfirmation(dbA, id)).not.toBeNull();
+    release();
+    expect(await outcome).toMatchObject({ code: "POLICY_DENIED" });
+    expect(sends(kit, a.kit, b.kit)).toHaveLength(0);
+  });
+
+  it("a stale instance cannot mark a newer quote fresh", async () => {
+    const s = await twoInstances();
+    const p = await s.a.h.propose(s.ctx(), "swap", { tokenIn: "USDC", tokenOut: "EURC", amountIn: "10" });
+    const id = (p.island as { intentId: string }).intentId;
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const estimate = s.a.kit.estimateSwap.bind(s.a.kit);
+    s.a.kit.estimateSwap = async (w, params) => { entered(); await gate; return estimate(w, params); };
+    const later = new Date(T0.getTime() + 31_000);
+    const outcome = s.a.h.confirm(s.ctx({ channel: "screen", now: () => later }), id, "screen").then(() => null, (e: unknown) => e);
+    await started;
+    await expireClaim(s.dbA, id);
+    expect(await claimConfirmation(s.dbA, id)).not.toBeNull();
+    const before = (await new IntentRepo(s.dbA).get(id))!;
+    release();
+    expect(await outcome).toMatchObject({ code: "POLICY_DENIED" });
+    const after = (await new IntentRepo(s.dbA).get(id))!;
+    expect(after.quoteAt).toBe(before.quoteAt);
+    expect(after.status).toBe("awaiting_confirmation");
+  });
+});
+
+describe("execution fence under a concurrent revision", () => {
+  it("a revision committed while the execution transition waits on the row lock stops execution", async () => {
+    const s = await twoInstances();
+    const kit = new FakeAppKit();
+    kit.setBalance(W, "USDC", "100");
+    const real = new DbPolicyProvider(s.dbA);
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const policy = { getLimits: async (u: string) => { entered(); await gate; return real.getLimits(u); } };
+    const h = createHarness({ db: s.dbA, kit, policy, bus: new EventBus() });
+    const p = await s.a.h.propose(s.ctx(), "send", { to: "Bob", amount: "5", token: "USDC" });
+    const id = (p.island as { intentId: string }).intentId;
+    const outcome = h.confirm(s.ctx({ channel: "screen" }), id, "screen").then(() => null, (e: unknown) => e);
+    await started;
+
+    // Another writer holds the intent row with an uncommitted revision bump while A's transaction reads the old one.
+    let commit!: () => void;
+    let locked!: () => void;
+    const hasLock = new Promise<void>((r) => { locked = r; });
+    const hold = new Promise<void>((r) => { commit = r; });
+    const holder = s.dbA.transaction(async (tx) => {
+      await new IntentRepo(tx).patch(id, { preview: { requoted: true } });
+      locked();
+      await hold;
+    });
+    await hasLock;
+    release();
+    for (let i = 0; i < 400; i++) {
+      const rows = await s.dbA.execute<{ n: number }>(sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`);
+      if (rows[0]!.n >= 1) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    commit();
+    await holder;
+    expect(await outcome).toMatchObject({ code: "POLICY_DENIED" });
+    expect(kit.calls.filter((c) => c.method === "send")).toHaveLength(0);
+    expect((await s.dbA.select().from(intents).where(eq(intents.id, id)))[0]!.status).toBe("awaiting_confirmation");
   });
 });

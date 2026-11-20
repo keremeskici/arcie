@@ -1,7 +1,7 @@
 import type { AppKitPort } from "@arcie/appkit";
 import { ArcieError, type ActionKind, type Channel, type IslandPayload, type TokenSymbol, tokenName } from "@arcie/core";
 import { choices, confirmClaims, type Db } from "@arcie/db";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { parseUnits } from "viem";
 import { ACTIONS, swapIsland } from "./actions.js";
@@ -25,6 +25,7 @@ import type { ToolDef, ToolResult } from "./tools/registry.js";
 const TTL_SEC = 120;
 const QUOTE_FRESH_MS = 30_000;
 type Claim = { token: string; revision: number };
+const STALE_CONSENT = "The details changed. Please check the new card and confirm again.";
 const SCREEN_ONLY = "Tap confirm on the card to finish.";
 
 export type ConfirmResult = { status: IntentStatus; summary: string; island?: IslandPayload };
@@ -136,7 +137,7 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
     const oldOut = parseUnits(String(intent.preview?.estimatedOut ?? "0"), decimals);
     const floor = (oldOut * BigInt(10_000 - p.slippageBps)) / 10_000n;
     if (parseUnits(est.estimatedOut, decimals) >= floor) {
-      await repo.patch(intent.id, { quoteAt: now.toISOString() });
+      if (!(await repo.touchFenced(intent.id, claim, { quoteAt: now.toISOString() }))) throw new ArcieError("POLICY_DENIED", { spoken: STALE_CONSENT });
       return null;
     }
     const expiresAt = new Date(now.getTime() + TTL_SEC * 1000).toISOString();
@@ -151,7 +152,7 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
       expiresAt,
     });
     // Cancelled, superseded, expired or revised while the provider answered: this consent is stale.
-    if (!written) throw new ArcieError("POLICY_DENIED", { spoken: "The details changed. Please check the new card and confirm again." });
+    if (!written) throw new ArcieError("POLICY_DENIED", { spoken: STALE_CONSENT });
     bus.publish(ctx.sessionId, island);
     await audit(db, ctx, "intent.requoted", { estimatedOut: est.estimatedOut }, intent.id);
     return { status: "awaiting_confirmation", summary: island.spokenPrompt, island };
@@ -200,12 +201,11 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
       assertActive(ctx);
       const current = await txRepo.get(intent.id);
       if (current?.status !== "awaiting_confirmation") return false;
-      // Consent only counts while our claim is live and the card is the revision the claim saw.
-      const [live] = await tx.select({ token: confirmClaims.token }).from(confirmClaims)
-        .where(and(eq(confirmClaims.intentId, intent.id), eq(confirmClaims.token, claim.token), sql`${confirmClaims.expiresAt} > now()`));
-      if (!live || current.revision !== claim.revision) throw new ArcieError("POLICY_DENIED", { spoken: "The details changed. Please check the new card and confirm again." });
+      // Lock our claim row: a takeover can't commit while we decide, and the fenced transition below rechecks it.
+      await tx.select({ token: confirmClaims.token }).from(confirmClaims)
+        .where(and(eq(confirmClaims.intentId, intent.id), eq(confirmClaims.token, claim.token))).for("update");
       assertConfirmable(current, { channel, userTurn: ctx.userTurn, now: ctx.now() });
-      if (current.paramsHash !== intent.paramsHash) throw new ArcieError("POLICY_DENIED", { spoken: "The details changed. Please check the new card and confirm again." });
+      if (current.paramsHash !== intent.paramsHash) throw new ArcieError("POLICY_DENIED", { spoken: STALE_CONSENT });
       const denied = checkLimits({
         action: intent.kind,
         token: (intent.params.tokenIn ?? intent.params.token) as TokenSymbol,
@@ -216,7 +216,10 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
         ...(typeof intent.params.slippageBps === "number" ? { slippageBps: intent.params.slippageBps } : {}),
       });
       if (denied) throw new ArcieError(denied.code, { spoken: denied.reason });
-      return txRepo.transition(intent.id, "awaiting_confirmation", "executing", { confirmedVia: channel });
+      // Atomic with the status change: token live and revision unchanged since the claim, or nothing executes.
+      if (await txRepo.executeFenced(intent.id, claim, { confirmedVia: channel })) return true;
+      if ((await txRepo.get(intent.id))?.status !== "awaiting_confirmation") return false;
+      throw new ArcieError("POLICY_DENIED", { spoken: STALE_CONSENT });
     });
     if (!claimed) {
       return { status: "executing", summary: "Already on it." };

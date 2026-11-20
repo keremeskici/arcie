@@ -88,6 +88,16 @@ export class IntentRepo {
     await this.db.update(intents).set({ ...patch, ...revisionBump(patch), updatedAt: new Date().toISOString() }).where(eq(intents.id, id));
   }
 
+  /** Awaiting, same revision the caller saw, and the caller's claim token still live (database time). */
+  private fence(id: string, expected: { token: string; revision: number }) {
+    return and(
+      eq(intents.id, id),
+      eq(intents.status, "awaiting_confirmation"),
+      eq(intents.revision, expected.revision),
+      sql`exists (select 1 from ${confirmClaims} where ${confirmClaims.intentId} = ${intents.id} and ${confirmClaims.token} = ${expected.token} and ${confirmClaims.expiresAt} > now())`,
+    );
+  }
+
   /**
    * Fenced update for the confirm path: writes only while the intent is still awaiting confirmation, the caller's
    * claim token is live (database time) and the revision is the one the caller saw. Increments the revision.
@@ -96,12 +106,27 @@ export class IntentRepo {
     const res = await this.db
       .update(intents)
       .set({ ...patch, revision: sql`${intents.revision} + 1`, updatedAt: new Date().toISOString() })
-      .where(and(
-        eq(intents.id, id),
-        eq(intents.status, "awaiting_confirmation"),
-        eq(intents.revision, expected.revision),
-        sql`exists (select 1 from ${confirmClaims} where ${confirmClaims.intentId} = ${intents.id} and ${confirmClaims.token} = ${expected.token} and ${confirmClaims.expiresAt} > now())`,
-      ))
+      .where(this.fence(id, expected))
+      .returning({ id: intents.id });
+    return res.length === 1;
+  }
+
+  /** Same fence, but for a field that is not part of what the user consented to (e.g. `quoteAt`): no revision bump. */
+  async touchFenced(id: string, expected: { token: string; revision: number }, patch: Pick<IntentPatch, "quoteAt">): Promise<boolean> {
+    const res = await this.db
+      .update(intents)
+      .set({ ...patch, updatedAt: new Date().toISOString() })
+      .where(this.fence(id, expected))
+      .returning({ id: intents.id });
+    return res.length === 1;
+  }
+
+  /** The awaiting -> executing step under the same fence, so stale consent can't start execution. */
+  async executeFenced(id: string, expected: { token: string; revision: number }, patch: IntentPatch = {}): Promise<boolean> {
+    const res = await this.db
+      .update(intents)
+      .set({ ...patch, ...revisionBump(patch), status: "executing", updatedAt: new Date().toISOString() })
+      .where(this.fence(id, expected))
       .returning({ id: intents.id });
     return res.length === 1;
   }
