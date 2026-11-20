@@ -50,13 +50,13 @@ export function chatRoutes(deps: { db: Db; agent: AgentFn; demoUserId: string; m
     let sessionId: string;
     if (deps.authMode === "privy") {
       // The request comes from ElevenLabs' servers: trust only the user-bound voice session, never user_id in the body.
-      const bound = resolveVoiceSession(deps.db, requestedSession);
+      const bound = await resolveVoiceSession(deps.db, requestedSession);
       if (!bound) return c.json({ error: { message: "Unknown or expired voice session.", type: "invalid_request_error", code: "UNAUTHENTICATED" } }, 401);
       userId = bound.userId;
       sessionId = requestedSession!;
     } else {
       userId = body.user_id ?? extra?.user_id ?? c.req.header("x-arcie-user") ?? deps.demoUserId;
-      if (!deps.db.select().from(users).where(eq(users.id, userId)).get()) {
+      if (!(await deps.db.select().from(users).where(eq(users.id, userId)).limit(1))[0]) {
         return c.json({ error: { message: `Unknown user ${userId}`, type: "invalid_request_error" } }, 404);
       }
       sessionId = requestedSession ?? `default:${userId}`;
@@ -65,13 +65,12 @@ export function chatRoutes(deps: { db: Db; agent: AgentFn; demoUserId: string; m
 
     // userTurn = number of user messages; replays/retries must never lower it.
     const incomingTurn = messages.filter((m) => m.role === "user").length;
-    const stored = deps.db.select().from(sessions).where(eq(sessions.id, sessionId)).get();
+    const stored = (await deps.db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1))[0];
     const userTurn = Math.max(incomingTurn, stored?.userTurn ?? 0);
-    deps.db
+    await deps.db
       .insert(sessions)
       .values({ id: sessionId, userId, channel, userTurn })
-      .onConflictDoUpdate({ target: sessions.id, set: { userTurn, channel } })
-      .run();
+      .onConflictDoUpdate({ target: sessions.id, set: { userTurn, channel } });
 
     // A new request for the session means the user spoke again: abort the previous turn.
     inflight.get(sessionId)?.abort();

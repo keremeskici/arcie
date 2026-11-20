@@ -4,7 +4,8 @@
     "packages/*/src/**/*.ts",
     "apps/*/src/**/*.ts",
     "apps/*/scripts/**/*.ts",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "vitest.global-setup.ts"
   ],
   "exclude": [
     "apps/web/**"

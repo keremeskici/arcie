@@ -29,7 +29,7 @@ if (!process.env.CIRCLE_WALLET_SET_ID) {
 }
 const walletSetId = need("CIRCLE_WALLET_SET_ID");
 
-const db = openDb();
+const { db, close } = openDb();
 const demoId = process.env.DEMO_USER_ID ?? "demo";
 await seed(db, { userId: demoId });
 await seed(db, { userId: "recipient" });
@@ -57,3 +57,4 @@ console.log(JSON.stringify({
   demo: { ...demo, balances: await kit.getBalances(demo) },
   recipient: { ...recipient, balances: await kit.getBalances(recipient) },
 }, null, 2));
+await close();

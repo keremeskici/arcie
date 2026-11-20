@@ -44,9 +44,9 @@ export function meRoutes(deps: AppDeps) {
 
   app.get("/me", async (c) => {
     const { userId } = await deps.identify(c);
-    const user = deps.db.select().from(users).where(eq(users.id, userId)).get();
+    const user = (await deps.db.select().from(users).where(eq(users.id, userId)).limit(1))[0];
     if (!user) throw new ArcieError("NOT_FOUND", { spoken: "I don't know this account yet." });
-    const ws = deps.db.select().from(wallets).where(eq(wallets.userId, userId)).all();
+    const ws = await deps.db.select().from(wallets).where(eq(wallets.userId, userId));
     const limits = await new DbPolicyProvider(deps.db).getLimits(userId);
     return c.json({ user, wallets: ws.map((w) => ({ chain: w.chain, address: w.address })), limits });
   });
@@ -106,13 +106,12 @@ export function meRoutes(deps: AppDeps) {
     const body = (await c.req.json().catch(() => ({}))) as { messages?: ChatCompletionMessageParam[] };
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const incomingTurn = messages.filter((m) => m.role === "user").length;
-    const stored = deps.db.select().from(sessions).where(eq(sessions.id, ctx.sessionId)).get();
+    const stored = (await deps.db.select().from(sessions).where(eq(sessions.id, ctx.sessionId)).limit(1))[0];
     const userTurn = Math.max(incomingTurn, stored?.userTurn ?? 0);
-    deps.db
+    await deps.db
       .insert(sessions)
       .values({ id: ctx.sessionId, userId: ctx.userId, channel: "repl", userTurn })
-      .onConflictDoUpdate({ target: sessions.id, set: { userTurn, channel: "repl" } })
-      .run();
+      .onConflictDoUpdate({ target: sessions.id, set: { userTurn, channel: "repl" } });
     let reply = "";
     for await (const s of deps.agent({ ...ctx, channel: "repl", userTurn }, messages)) reply += s;
     return c.json({ reply, sessionId: ctx.sessionId, userTurn });
@@ -120,7 +119,7 @@ export function meRoutes(deps: AppDeps) {
 
   app.get("/activity", async (c) => {
     const { userId } = await deps.identify(c);
-    const rows = deps.db.select().from(audit).where(eq(audit.userId, userId)).orderBy(desc(audit.id)).limit(50).all();
+    const rows = await deps.db.select().from(audit).where(eq(audit.userId, userId)).orderBy(desc(audit.id)).limit(50);
     const items = rows
       .filter((r) => r.type.startsWith("intent.") || r.type.startsWith("onramp."))
       .map((r) => ({

@@ -6,9 +6,10 @@ import { getWallet, HOME_CHAIN } from "@arcie/appkit";
 import { ArcieError } from "@arcie/core";
 import { appKit, openDb } from "./lib.js";
 
-const db = openDb();
+const { db, close } = openDb();
 const demo = await getWallet(db, process.env.DEMO_USER_ID ?? "demo", HOME_CHAIN);
 const recipient = await getWallet(db, "recipient", HOME_CHAIN);
+await close();
 if (!demo || !recipient) throw new Error("Run `pnpm provision` first.");
 
 const kit = appKit();

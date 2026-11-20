@@ -20,7 +20,7 @@ export function authRoutes(deps: AppDeps) {
   /** Before starting ElevenLabs: a session id bound to this user, passed as the custom-LLM extra body session_id. */
   app.post("/voice/session", async (c) => {
     const { userId } = await deps.identify(c);
-    return c.json(mintVoiceSession(deps.db, userId));
+    return c.json(await mintVoiceSession(deps.db, userId));
   });
 
   return app;

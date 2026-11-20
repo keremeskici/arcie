@@ -48,7 +48,7 @@ export function readTools(svc: Svc) {
       args: z.object({ name: z.string().min(1) }),
       stepLabel: (a) => `Looking up ${a.name}`,
       run: async (ctx, a) => {
-        const r = resolveRecipient(svc, ctx.userId, a.name);
+        const r = await resolveRecipient(svc, ctx.userId, a.name);
         if (r.kind === "choice") return { summary: `I found ${joinNames(r.options.map((o) => o.label))}.`, data: { matches: r.options } };
         return { summary: `${r.recipient.label} is in your contacts.`, data: { matches: [{ label: r.recipient.label, address: r.recipient.address }] } };
       },
@@ -60,7 +60,7 @@ export function readTools(svc: Svc) {
       args: z.object({}),
       stepLabel: () => "Opening your contacts",
       run: async (ctx) => {
-        const rows = svc.db.select().from(contacts).where(eq(contacts.userId, ctx.userId)).all();
+        const rows = await svc.db.select().from(contacts).where(eq(contacts.userId, ctx.userId));
         return {
           summary: rows.length ? `Your contacts are ${joinNames(rows.map((r) => r.name))}.` : "You don't have any contacts yet.",
           data: { contacts: rows.map((r) => ({ id: r.id, name: r.name })) },
@@ -117,7 +117,7 @@ export function readTools(svc: Svc) {
       args: z.object({ limit: z.number().int().min(1).max(50).optional() }),
       stepLabel: () => "Checking your recent activity",
       run: async (ctx, a) => {
-        const rows = svc.repo.listForUser(ctx.userId, a.limit ?? 10).filter((i) => i.status === "succeeded" || i.status === "failed");
+        const rows = (await svc.repo.listForUser(ctx.userId, a.limit ?? 10)).filter((i) => i.status === "succeeded" || i.status === "failed");
         const items = rows.map((i) => ({ intentId: i.id, kind: i.kind, status: i.status, params: i.params, txHash: i.txHash, at: i.updatedAt }));
         const last = rows[0];
         const lastText = last ? `${KIND_WORDS[last.kind]} ${String(last.params.amount ?? last.params.amountIn ?? "")} ${tokenName(String(last.params.token ?? last.params.tokenIn ?? ""))}`.trim() : "";
@@ -131,7 +131,7 @@ export function readTools(svc: Svc) {
       args: z.object({ id: z.string() }),
       stepLabel: () => "Checking that request",
       run: async (ctx, a) => {
-        const i = svc.repo.get(a.id);
+        const i = await svc.repo.get(a.id);
         if (!i || i.userId !== ctx.userId) throw new ArcieError("NOT_FOUND");
         return { summary: `That request is ${i.status.replace(/_/g, " ")}.`, data: { id: i.id, kind: i.kind, status: i.status, txHash: i.txHash } };
       },

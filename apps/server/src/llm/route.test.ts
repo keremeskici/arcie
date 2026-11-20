@@ -1,4 +1,5 @@
-import { createDb, seed, sessions, type Db } from "@arcie/db";
+import { seed, sessions, type Db } from "@arcie/db";
+import { createTestDb } from "@arcie/db/testing";
 import type { HarnessCtx } from "@arcie/harness";
 import { eq } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -14,7 +15,7 @@ const echoAgent: AgentFn = async function* (ctx, _messages, signal) {
 };
 
 beforeEach(async () => {
-  db = createDb(":memory:");
+  db = (await createTestDb()).db;
   await seed(db, { userId: "demo" });
   await seed(db, { userId: "kerem" });
   seen = [];
@@ -48,7 +49,7 @@ describe("POST /v1/chat/completions", () => {
     const app = chatRoutes({ db, agent: echoAgent, demoUserId: "demo", model: "m" });
     await (await post(app, { messages: user(3), session_id: "s1" })).text();
     await (await post(app, { messages: user(2), session_id: "s1" })).text();
-    expect(db.select().from(sessions).where(eq(sessions.id, "s1")).get()?.userTurn).toBe(3);
+    expect((await db.select().from(sessions).where(eq(sessions.id, "s1")).limit(1))[0]?.userTurn).toBe(3);
     expect(seen.map((s) => s.ctx.userTurn)).toEqual([3, 3]);
   });
 

@@ -3,7 +3,7 @@ import { createCircleAppKit, type AppKitPort } from "@arcie/appkit";
 import { createDb, type Db } from "@arcie/db";
 import { initiateDeveloperControlledWalletsClient } from "@circle-fin/developer-controlled-wallets";
 import { readFileSync, writeFileSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -14,9 +14,9 @@ export function need(name: string): string {
   return v;
 }
 
-export function openDb(): Db {
-  const url = process.env.DATABASE_URL ?? "./arcie.db";
-  return createDb(isAbsolute(url) ? url : resolve(ROOT, url));
+/** Opens the Postgres database from DATABASE_URL. Call `close()` when the script is done so the process can exit. */
+export function openDb(): { db: Db; close(): Promise<void> } {
+  return createDb(need("DATABASE_URL"));
 }
 
 export function circleClient() {

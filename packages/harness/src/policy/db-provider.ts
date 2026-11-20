@@ -20,7 +20,7 @@ export class DbPolicyProvider implements PolicyProvider {
   constructor(private readonly db: Db) {}
 
   async getLimits(userId: string) {
-    const row = this.db.select().from(limits).where(eq(limits.userId, userId)).get();
+    const row = (await this.db.select().from(limits).where(eq(limits.userId, userId)).limit(1))[0];
     if (!row) throw new ArcieError("NOT_FOUND", { detail: { limitsFor: userId } });
     return { ...agentLimitsSchema.parse(row.json), source: "db" as const };
   }

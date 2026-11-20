@@ -51,7 +51,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/", authRoutes(deps));
   app.route("/", eventRoutes({
     ...deps,
-    ...(deps.authMode === "privy" ? { authorizeSession: async (sid: string) => resolveVoiceSession(deps.db, sid) !== null } : {}),
+    ...(deps.authMode === "privy" ? { authorizeSession: async (sid: string) => (await resolveVoiceSession(deps.db, sid)) !== null } : {}),
   }));
   return app;
 }

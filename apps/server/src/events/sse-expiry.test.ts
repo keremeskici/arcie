@@ -9,7 +9,7 @@ describe("event credential lifetime (F16)", () => {
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
       const { app, db, bus } = await testApp({ authMode: "privy" });
-      db.insert(sessions).values({ id: "expiring", userId: "demo", channel: "voice", expiresAt: new Date(Date.now() + 1000).toISOString() }).run();
+      await db.insert(sessions).values({ id: "expiring", userId: "demo", channel: "voice", expiresAt: new Date(Date.now() + 1000).toISOString() });
       const response = await app.request("/events?sessionId=expiring");
       expect(response.status).toBe(200);
       reader = response.body!.getReader();

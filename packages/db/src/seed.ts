@@ -11,17 +11,15 @@ const DEMO_CONTACTS: { name: string; address: `0x${string}` }[] = [
 
 export async function seed(db: Db, opts: { userId: string }): Promise<void> {
   const { userId } = opts;
-  db.transaction((tx) => {
-    tx.insert(users)
+  await db.transaction(async (tx) => {
+    await tx.insert(users)
       .values({ id: userId, displayName: "Demo", homeChain: "Arc_Testnet" })
-      .onConflictDoNothing()
-      .run();
+      .onConflictDoNothing();
     for (const c of DEMO_CONTACTS) {
-      tx.insert(contacts)
+      await tx.insert(contacts)
         .values({ id: `${userId}:${c.name.toLowerCase().replace(/\s+/g, "-")}`, userId, chain: "Arc_Testnet", ...c })
-        .onConflictDoNothing()
-        .run();
+        .onConflictDoNothing();
     }
-    tx.insert(limits).values({ userId, json: DEFAULT_LIMITS }).onConflictDoNothing().run();
+    await tx.insert(limits).values({ userId, json: DEFAULT_LIMITS }).onConflictDoNothing();
   });
 }

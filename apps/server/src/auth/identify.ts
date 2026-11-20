@@ -1,4 +1,4 @@
-import { sessions, type Db } from "@arcie/db";
+import { sessions, type DbOrTx } from "@arcie/db";
 import { eq } from "drizzle-orm";
 import type { Context } from "hono";
 import { randomBytes } from "node:crypto";
@@ -24,17 +24,17 @@ export function createIdentify(deps: { mode: AuthMode; verifier?: TokenVerifier 
 }
 
 /** Unguessable id bound to one user, handed to ElevenLabs as the custom-LLM session_id (spec §17). */
-export function mintVoiceSession(db: Db, userId: string, now = new Date()): { sessionId: string; expiresAt: string } {
+export async function mintVoiceSession(db: DbOrTx, userId: string, now = new Date()): Promise<{ sessionId: string; expiresAt: string }> {
   const sessionId = randomBytes(32).toString("base64url");
   const expiresAt = new Date(now.getTime() + VOICE_SESSION_TTL_MS).toISOString();
-  db.insert(sessions).values({ id: sessionId, userId, channel: "voice", userTurn: 0, expiresAt }).run();
+  await db.insert(sessions).values({ id: sessionId, userId, channel: "voice", userTurn: 0, expiresAt });
   return { sessionId, expiresAt };
 }
 
 /** The user behind a minted voice session, or null if unknown, never minted, or expired. */
-export function resolveVoiceSession(db: Db, sessionId: string | undefined, now = new Date()): { userId: string } | null {
+export async function resolveVoiceSession(db: DbOrTx, sessionId: string | undefined, now = new Date()): Promise<{ userId: string } | null> {
   if (!sessionId) return null;
-  const row = db.select().from(sessions).where(eq(sessions.id, sessionId)).get();
+  const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1);
   if (!row?.expiresAt || row.expiresAt <= now.toISOString()) return null;
   return { userId: row.userId };
 }

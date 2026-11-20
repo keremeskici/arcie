@@ -1,6 +1,7 @@
 /** Test-only wiring: a full app on FakeAppKit with a seeded demo user and wallet. */
 import { FakeAppKit, type WalletCreator, type WalletRef } from "@arcie/appkit";
-import { createDb, seed, wallets } from "@arcie/db";
+import { seed, wallets } from "@arcie/db";
+import { createTestDb } from "@arcie/db/testing";
 import { createHarness, DbPolicyProvider, EventBus } from "@arcie/harness";
 import { createApp, type AppDeps } from "./app.js";
 import { AuthError } from "./auth/errors.js";
@@ -35,9 +36,9 @@ function fakeCircle(): WalletCreator {
 }
 
 export async function testApp(over: Partial<AppDeps> & { authMode?: AuthMode } = {}) {
-  const db = createDb(":memory:");
+  const { db, close } = await createTestDb();
   await seed(db, { userId: "demo" });
-  db.insert(wallets).values({ id: "w1", userId: "demo", chain: "Arc_Testnet", circleWalletId: "w1", address: DEMO_WALLET.address, accountType: "EOA" }).run();
+  await db.insert(wallets).values({ id: "w1", userId: "demo", chain: "Arc_Testnet", circleWalletId: "w1", address: DEMO_WALLET.address, accountType: "EOA" });
   const kit = new FakeAppKit();
   kit.setBalance(DEMO_WALLET, "USDC", "100");
   kit.setBalance(DEMO_WALLET, "EURC", "20");
@@ -67,5 +68,5 @@ export async function testApp(over: Partial<AppDeps> & { authMode?: AuthMode } =
       headers: { "content-type": "application/json", ...headers },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })) as TestResponse;
-  return { app, db, kit, bus, harness, call };
+  return { app, db, kit, bus, harness, call, close };
 }

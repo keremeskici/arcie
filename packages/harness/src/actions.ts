@@ -28,14 +28,14 @@ const decimalsOf = (w: WalletRef, t: TokenSymbol) => getChain(w.chain).tokens[t]
 
 async function common(svc: Svc, ctx: HarnessCtx, w: WalletRef) {
   const [limits, balances] = await Promise.all([svc.policy.getLimits(ctx.userId), balancesOf(svc, w)]);
-  return { limits, balances, spent: svc.repo.spentTodayUsd(ctx.userId, ctx.now()), gas: getChain(w.chain).gasToken };
+  return { limits, balances, spent: await svc.repo.spentTodayUsd(ctx.userId, ctx.now()), gas: getChain(w.chain).gasToken };
 }
 
 // ---------- send ----------
 export interface SendArgs { to: string; amount: string; token: TokenSymbol }
 
 async function prepareSend(svc: Svc, ctx: HarnessCtx, w: WalletRef, a: SendArgs): Promise<Prepared> {
-  const rec = resolveRecipient(svc, ctx.userId, a.to);
+  const rec = await resolveRecipient(svc, ctx.userId, a.to);
   if (rec.kind === "choice") return { type: "choice", question: "Which contact did you mean?", options: rec.options };
   const r = rec.recipient;
   const decimals = decimalsOf(w, a.token);

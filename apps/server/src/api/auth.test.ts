@@ -30,7 +30,7 @@ describe("identify in privy mode", () => {
   it("refuses a session header that belongs to someone else", async () => {
     const { call, db } = await testApp({ authMode: "privy" });
     await seed(db, { userId: "eve" });
-    db.insert(sessions).values({ id: "eves-session", userId: "eve", channel: "voice", userTurn: 0 }).run();
+    await db.insert(sessions).values({ id: "eves-session", userId: "eve", channel: "voice", userTurn: 0 });
     const r = await call("POST", "/intents", { kind: "send", params: { to: "Bob", amount: "1", token: "USDC" } }, { ...bearer("demo"), "x-arcie-session": "eves-session" });
     expect(r.status).toBe(401);
   });
@@ -61,7 +61,7 @@ describe("voice sessions", () => {
     const ms = new Date(r.expiresAt).getTime() - Date.now();
     expect(ms).toBeGreaterThan(119 * 60_000);
     expect(ms).toBeLessThanOrEqual(120 * 60_000);
-    expect(db.select().from(sessions).where(eq(sessions.id, r.sessionId)).get()).toMatchObject({ userId: "demo", channel: "voice" });
+    expect((await db.select().from(sessions).where(eq(sessions.id, r.sessionId)).limit(1))[0]).toMatchObject({ userId: "demo", channel: "voice" });
   });
 
   it("binds the custom-LLM request to the session's user, ignoring user_id in the body", async () => {
@@ -87,7 +87,7 @@ describe("voice sessions", () => {
     expect((await call("POST", "/v1/chat/completions", body("made-up"))).status).toBe(401);
     expect((await call("POST", "/v1/chat/completions", { messages: [{ role: "user", content: "hi" }] })).status).toBe(401);
     const { sessionId } = await (await call("POST", "/voice/session", {}, bearer("demo"))).json();
-    db.update(sessions).set({ expiresAt: new Date(Date.now() - 1000).toISOString() }).where(eq(sessions.id, sessionId)).run();
+    await db.update(sessions).set({ expiresAt: new Date(Date.now() - 1000).toISOString() }).where(eq(sessions.id, sessionId));
     expect((await call("POST", "/v1/chat/completions", body(sessionId))).status).toBe(401);
   });
 

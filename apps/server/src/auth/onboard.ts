@@ -20,36 +20,35 @@ export async function onboard(
   id: Identity,
 ): Promise<{ user: User; wallet: WalletRef; limits: AgentLimits; dripTx: string | null }> {
   const { db } = deps;
-  db.insert(users)
+  await db.insert(users)
     .values({ id: id.userId, displayName: id.displayName, homeChain: HOME_CHAIN, email: id.email ?? null, linkedWallet: id.linkedWallet ?? null })
     .onConflictDoUpdate({
       target: users.id,
       set: { displayName: id.displayName, ...(id.email ? { email: id.email } : {}), ...(id.linkedWallet ? { linkedWallet: id.linkedWallet } : {}) },
-    })
-    .run();
-  db.insert(limits).values({ userId: id.userId, json: DEFAULT_LIMITS }).onConflictDoNothing().run();
+    });
+  await db.insert(limits).values({ userId: id.userId, json: DEFAULT_LIMITS }).onConflictDoNothing();
 
   const wallet = await ensureWallet(db, deps.circle, { userId: id.userId, chain: HOME_CHAIN, walletSetId: deps.walletSetId, accountType: "EOA" });
 
   let dripTx: string | null = null;
   if (deps.drip) {
     // Compare-and-set claim so two racing logins can't both drip.
-    const claimed = db
+    const claimed = (await db
       .update(users)
       .set({ welcomeDripAt: new Date().toISOString() })
       .where(and(eq(users.id, id.userId), isNull(users.welcomeDripAt)))
-      .run().changes === 1;
+      .returning({ id: users.id })).length === 1;
     if (claimed) {
       try {
         dripTx = await deps.drip(wallet.address);
       } catch (e) {
         console.warn(`Welcome drip failed for ${id.userId}: ${(e as Error).message}`);
-        db.update(users).set({ welcomeDripAt: null }).where(eq(users.id, id.userId)).run();
+        await db.update(users).set({ welcomeDripAt: null }).where(eq(users.id, id.userId));
       }
     }
   }
 
-  const user = db.select().from(users).where(eq(users.id, id.userId)).get()!;
-  const row = db.select().from(limits).where(eq(limits.userId, id.userId)).get()!;
-  return { user, wallet, limits: row.json, dripTx };
+  const [user] = await db.select().from(users).where(eq(users.id, id.userId)).limit(1);
+  const [row] = await db.select().from(limits).where(eq(limits.userId, id.userId)).limit(1);
+  return { user: user!, wallet, limits: row!.json, dripTx };
 }

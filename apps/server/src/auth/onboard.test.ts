@@ -1,6 +1,7 @@
 import type { WalletCreator } from "@arcie/appkit";
 import { DEFAULT_LIMITS } from "@arcie/core";
-import { createDb, limits, users, wallets } from "@arcie/db";
+import { limits, users, wallets } from "@arcie/db";
+import { createTestDb } from "@arcie/db/testing";
 import { describe, expect, it } from "vitest";
 import { onboard } from "./onboard.js";
 
@@ -19,7 +20,7 @@ const KEREM = { userId: "did:privy:kerem", displayName: "Kerem", email: "k@x.io"
 
 describe("onboard", () => {
   it("is idempotent: one user, one limits row, one wallet, one drip", async () => {
-    const db = createDb(":memory:");
+    const { db } = await createTestDb();
     const { circle, created } = fakeCircle();
     const drips: string[] = [];
     const deps = { db, circle, walletSetId: "ws", drip: async (a: string) => (drips.push(a), "0xdrip") };
@@ -32,20 +33,20 @@ describe("onboard", () => {
     expect(second.dripTx).toBeNull();
     expect(drips).toEqual([first.wallet.address]);
     expect(created()).toBe(1);
-    expect(db.select().from(users).all()).toHaveLength(1);
-    expect(db.select().from(limits).all().map((l) => l.json)).toEqual([DEFAULT_LIMITS]);
-    expect(db.select().from(wallets).all()).toHaveLength(1);
+    expect(await db.select().from(users)).toHaveLength(1);
+    expect((await db.select().from(limits)).map((l) => l.json)).toEqual([DEFAULT_LIMITS]);
+    expect(await db.select().from(wallets)).toHaveLength(1);
     expect(first.limits).toEqual(DEFAULT_LIMITS);
   });
 
   it("stores the email and linked wallet", async () => {
-    const db = createDb(":memory:");
+    const { db } = await createTestDb();
     const { user } = await onboard({ db, circle: fakeCircle().circle, walletSetId: "ws" }, KEREM);
     expect(user).toMatchObject({ id: "did:privy:kerem", displayName: "Kerem", email: "k@x.io", linkedWallet: KEREM.linkedWallet, homeChain: "Arc_Testnet" });
   });
 
   it("finishes onboarding when the drip fails, and retries the drip next time", async () => {
-    const db = createDb(":memory:");
+    const { db } = await createTestDb();
     let fail = true;
     const drip = async () => {
       if (fail) throw new Error("admin wallet empty");
@@ -60,7 +61,7 @@ describe("onboard", () => {
   });
 
   it("drips only once when two logins race", async () => {
-    const db = createDb(":memory:");
+    const { db } = await createTestDb();
     let drips = 0;
     const deps = { db, circle: fakeCircle().circle, walletSetId: "ws", drip: async () => (drips++, "0xd") };
     await Promise.all([onboard(deps, KEREM), onboard(deps, KEREM)]);

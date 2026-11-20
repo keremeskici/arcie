@@ -14,7 +14,7 @@ export function contactRoutes(deps: AppDeps) {
 
   app.get("/contacts", async (c) => {
     const { userId } = await deps.identify(c);
-    const rows = deps.db.select().from(contacts).where(eq(contacts.userId, userId)).all();
+    const rows = await deps.db.select().from(contacts).where(eq(contacts.userId, userId));
     return c.json({ contacts: rows.map((r) => ({ id: r.id, name: r.name, address: r.address, chain: r.chain })) });
   });
 
@@ -25,8 +25,8 @@ export function contactRoutes(deps: AppDeps) {
       return c.json({ error: { code: "INVALID_RECIPIENT", message: "That name or address doesn't look right." } }, 400);
     }
     const row = { id: randomUUID(), userId, name: parsed.data.name, address: getAddress(parsed.data.address), chain: "Arc_Testnet" as const };
-    const inserted = deps.db.insert(contacts).values(row).onConflictDoNothing().run();
-    if (inserted.changes === 0) return c.json({ error: { code: "INVALID_RECIPIENT", message: "You already have a contact with that name." } }, 400);
+    const inserted = await deps.db.insert(contacts).values(row).onConflictDoNothing().returning({ id: contacts.id });
+    if (inserted.length === 0) return c.json({ error: { code: "INVALID_RECIPIENT", message: "You already have a contact with that name." } }, 400);
     return c.json({ contact: row });
   });
 

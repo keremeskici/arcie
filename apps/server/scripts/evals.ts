@@ -5,6 +5,7 @@
 import { FakeAppKit, type WalletRef } from "@arcie/appkit";
 import { createDb, seed, wallets } from "@arcie/db";
 import { createHarness, DbPolicyProvider, EventBus, type HarnessCtx, type ToolResult } from "@arcie/harness";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import OpenAI from "openai";
 import { runAgentTurn, type ChatClient } from "../src/llm/loop.js";
@@ -23,12 +24,14 @@ const cases = JSON.parse(readFileSync(new URL("../evals/utterances.json", import
 const openai = new OpenAI({ apiKey: need("OPENAI_API_KEY") }) as unknown as ChatClient;
 const model = need("OPENAI_MODEL");
 const reasoningEffort = process.env.OPENAI_REASONING_EFFORT || undefined;
+/** Scratch Postgres (migrated). Each case gets its own user and session, so parallel cases never touch each other. */
+const { db, close } = createDb(need("EVALS_DATABASE_URL"), { max: 4 });
 const W: WalletRef = { chain: "Arc_Testnet", address: "0x000000000000000000000000000000000000dEaD", circleWalletId: "w1" };
 
 async function runCase(c: Case) {
-  const db = createDb(":memory:");
-  await seed(db, { userId: "demo" });
-  db.insert(wallets).values({ id: "w1", userId: "demo", chain: "Arc_Testnet", circleWalletId: "w1", address: W.address, accountType: "EOA" }).run();
+  const userId = `eval-${randomUUID()}`;
+  await seed(db, { userId });
+  await db.insert(wallets).values({ id: `w-${userId}`, userId, chain: "Arc_Testnet", circleWalletId: "w1", address: W.address, accountType: "EOA" });
   const kit = new FakeAppKit();
   kit.setBalance(W, "USDC", "100");
   kit.setBalance(W, "EURC", "20");
@@ -42,7 +45,7 @@ async function runCase(c: Case) {
       return result;
     },
   };
-  const ctx: HarnessCtx = { userId: "demo", sessionId: "eval", channel: "voice", userTurn: 1, now: () => new Date(), runId: "eval" };
+  const ctx: HarnessCtx = { userId, sessionId: `eval:${userId}`, channel: "voice", userTurn: 1, now: () => new Date(), runId: "eval" };
   let reply = "";
   for await (const s of runAgentTurn({ openai, model, reasoningEffort, harness: recording }, ctx, [{ role: "user", content: c.say }])) reply += s;
 
@@ -73,3 +76,4 @@ const passed = results.filter((r) => r.ok).length;
 const pct = Math.round((passed / results.length) * 100);
 console.log(`\n${passed}/${results.length} passed (${pct}%) with ${model}`);
 process.exitCode = pct >= 90 ? 0 : 1;
+await close();

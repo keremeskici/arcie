@@ -1,5 +1,6 @@
 import { ArcieError, type IslandPayload, type StepsIsland } from "@arcie/core";
-import { audit as auditTable, createDb, seed } from "@arcie/db";
+import { audit as auditTable, seed } from "@arcie/db";
+import { createTestDb } from "@arcie/db/testing";
 import { describe, expect, it } from "vitest";
 import { audit } from "./audit.js";
 import type { HarnessCtx } from "./context.js";
@@ -54,10 +55,10 @@ describe("StepTracker", () => {
 
 describe("audit", () => {
   it("writes a row with user, session, intent and payload", async () => {
-    const db = createDb(":memory:");
+    const { db } = await createTestDb();
     await seed(db, { userId: "demo" });
-    audit(db, ctx, "tool.call", { name: "get_balances" }, "intent-1");
-    expect(db.select().from(auditTable).all()).toMatchObject([
+    await audit(db, ctx, "tool.call", { name: "get_balances" }, "intent-1");
+    expect(await db.select().from(auditTable)).toMatchObject([
       { userId: "demo", sessionId: "s1", intentId: "intent-1", type: "tool.call", payload: { name: "get_balances" } },
     ]);
   });

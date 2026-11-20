@@ -46,9 +46,9 @@ export async function recordOnrampEvent(
   svc: Svc,
   ctx: HarnessCtx,
   e: { type: "submitted" | "settled" | "failed"; payload: unknown },
-  audit: (type: string, payload: object) => void,
+  audit: (type: string, payload: object) => Promise<void>,
 ): Promise<void> {
-  audit(`onramp.${e.type}`, { payload: e.payload ?? null });
+  await audit(`onramp.${e.type}`, { payload: e.payload ?? null });
   // Browser reports are hints, not proof of a deposit. Always read balances from the chain.
   if (e.type !== "settled" && e.type !== "submitted") return;
   const w = await walletFor(svc, ctx);

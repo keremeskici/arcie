@@ -3,8 +3,6 @@ import { createDb, seed } from "@arcie/db";
 import { createHarness, DbPolicyProvider, EventBus } from "@arcie/harness";
 import { initiateDeveloperControlledWalletsClient } from "@circle-fin/developer-controlled-wallets";
 import { serve } from "@hono/node-server";
-import { isAbsolute, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import OpenAI from "openai";
 import { createApp } from "./app.js";
 import { createAdminDrip } from "./auth/drip.js";
@@ -16,8 +14,7 @@ import { runAgentTurn, type ChatClient } from "./llm/loop.js";
 import { reconcileExecuting } from "./reconcile.js";
 
 const env = loadEnv();
-const root = fileURLToPath(new URL("../../../", import.meta.url));
-const db = createDb(isAbsolute(env.DATABASE_URL) ? env.DATABASE_URL : resolve(root, env.DATABASE_URL));
+const { db } = createDb(env.DATABASE_URL);
 await seed(db, { userId: env.DEMO_USER_ID });
 
 const kit = createCircleAppKit({

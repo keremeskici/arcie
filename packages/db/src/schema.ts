@@ -1,9 +1,13 @@
 import type { ActionKind, AgentLimits, ChainId, Channel } from "@arcie/core";
-import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { bigint, integer, jsonb, pgSchema, text, uniqueIndex } from "drizzle-orm/pg-core";
 
 const now = () => new Date().toISOString();
 
-export const users = sqliteTable("users", {
+/** Private application schema: browser roles get no access (see the migration hardening task). */
+export const arcie = pgSchema("arcie");
+const table = arcie.table;
+
+export const users = table("users", {
   id: text("id").primaryKey(),
   displayName: text("display_name").notNull(),
   homeChain: text("home_chain").$type<ChainId>().notNull(),
@@ -15,7 +19,7 @@ export const users = sqliteTable("users", {
   createdAt: text("created_at").notNull().$defaultFn(now),
 });
 
-export const wallets = sqliteTable(
+export const wallets = table(
   "wallets",
   {
     id: text("id").primaryKey(),
@@ -28,7 +32,7 @@ export const wallets = sqliteTable(
   (t) => [uniqueIndex("wallets_user_chain").on(t.userId, t.chain)],
 );
 
-export const contacts = sqliteTable(
+export const contacts = table(
   "contacts",
   {
     id: text("id").primaryKey(),
@@ -40,12 +44,12 @@ export const contacts = sqliteTable(
   (t) => [uniqueIndex("contacts_user_name").on(t.userId, t.name)],
 );
 
-export const limits = sqliteTable("limits", {
+export const limits = table("limits", {
   userId: text("user_id").primaryKey().references(() => users.id),
-  json: text("json", { mode: "json" }).$type<AgentLimits>().notNull(),
+  json: jsonb("json").$type<AgentLimits>().notNull(),
 });
 
-export const sessions = sqliteTable("sessions", {
+export const sessions = table("sessions", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull().references(() => users.id),
   channel: text("channel").$type<Channel>().notNull(),
@@ -65,15 +69,15 @@ export type IntentStatus =
   | "succeeded"
   | "failed";
 
-export const intents = sqliteTable("intents", {
+export const intents = table("intents", {
   id: text("id").primaryKey(),
   sessionId: text("session_id").notNull(),
   userId: text("user_id").notNull().references(() => users.id),
   kind: text("kind").$type<ActionKind>().notNull(),
   chain: text("chain").$type<ChainId>().notNull(),
-  params: text("params", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  params: jsonb("params").$type<Record<string, unknown>>().notNull(),
   paramsHash: text("params_hash").notNull(),
-  preview: text("preview", { mode: "json" }).$type<Record<string, unknown>>(),
+  preview: jsonb("preview").$type<Record<string, unknown>>(),
   status: text("status").$type<IntentStatus>().notNull(),
   statusReason: text("status_reason"),
   usdValue: text("usd_value"),
@@ -82,30 +86,30 @@ export const intents = sqliteTable("intents", {
   confirmedVia: text("confirmed_via").$type<Channel>(),
   supersededBy: text("superseded_by"),
   txHash: text("tx_hash"),
-  actuals: text("actuals", { mode: "json" }).$type<Record<string, unknown>>(),
-  error: text("error", { mode: "json" }).$type<{ code: string; message: string }>(),
+  actuals: jsonb("actuals").$type<Record<string, unknown>>(),
+  error: jsonb("error").$type<{ code: string; message: string }>(),
   createdAt: text("created_at").notNull().$defaultFn(now),
   updatedAt: text("updated_at").notNull().$defaultFn(now),
   expiresAt: text("expires_at"),
 });
 
-export const choices = sqliteTable("choices", {
+export const choices = table("choices", {
   id: text("id").primaryKey(),
   sessionId: text("session_id").notNull(),
   question: text("question").notNull(),
-  options: text("options", { mode: "json" })
+  options: jsonb("options")
     .$type<{ id: string; label: string; detail?: string }[]>()
     .notNull(),
   selectedOptionId: text("selected_option_id"),
   createdAt: text("created_at").notNull().$defaultFn(now),
 });
 
-export const audit = sqliteTable("audit", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const audit = table("audit", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   userId: text("user_id").notNull(),
   sessionId: text("session_id"),
   intentId: text("intent_id"),
   type: text("type").notNull(),
-  payload: text("payload", { mode: "json" }).$type<unknown>().notNull(),
+  payload: jsonb("payload").$type<unknown>().notNull(),
   createdAt: text("created_at").notNull().$defaultFn(now),
 });

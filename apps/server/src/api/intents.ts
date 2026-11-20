@@ -25,7 +25,7 @@ export function intentRoutes(deps: AppDeps) {
 
   app.get("/intents/:id", async (c) => {
     const ctx = await screenCtx(deps, c);
-    const i = deps.harness.intents.get(c.req.param("id"));
+    const i = await deps.harness.intents.get(c.req.param("id"));
     if (!i || i.userId !== ctx.userId) throw new ArcieError("NOT_FOUND");
     return c.json({
       id: i.id,
@@ -49,7 +49,7 @@ export function intentRoutes(deps: AppDeps) {
 
   app.post("/intents/:id/cancel", async (c) => {
     const ctx = await screenCtx(deps, c);
-    const i = deps.harness.intents.get(c.req.param("id"));
+    const i = await deps.harness.intents.get(c.req.param("id"));
     if (!i || i.userId !== ctx.userId) throw new ArcieError("NOT_FOUND");
     const r = await deps.harness.cancel(ctx, i.id);
     return c.json({ summary: r.summary, ...(r.data as object) });

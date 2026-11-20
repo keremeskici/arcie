@@ -1,6 +1,7 @@
 import { FakeAppKit } from "@arcie/appkit";
 import type { IslandPayload, OnrampIsland, ReceiveIsland } from "@arcie/core";
-import { audit as auditTable, createDb, intents, seed, wallets } from "@arcie/db";
+import { audit as auditTable, intents, seed, wallets } from "@arcie/db";
+import { createTestDb } from "@arcie/db/testing";
 import { describe, expect, it } from "vitest";
 import type { HarnessCtx } from "./context.js";
 import { EventBus } from "./events.js";
@@ -10,9 +11,9 @@ import { DbPolicyProvider } from "./policy/db-provider.js";
 const ADDRESS = "0x000000000000000000000000000000000000dEaD";
 
 async function setup() {
-  const db = createDb(":memory:");
+  const { db } = await createTestDb();
   await seed(db, { userId: "demo" });
-  db.insert(wallets).values({ id: "w1", userId: "demo", chain: "Arc_Testnet", circleWalletId: "w1", address: ADDRESS, accountType: "EOA" }).run();
+  await db.insert(wallets).values({ id: "w1", userId: "demo", chain: "Arc_Testnet", circleWalletId: "w1", address: ADDRESS, accountType: "EOA" });
   const kit = new FakeAppKit();
   const bus = new EventBus();
   const islands: IslandPayload[] = [];
@@ -29,7 +30,7 @@ describe("start_onramp", () => {
     expect(islands.find((i) => i.kind === "onramp")).toEqual(result.island);
     expect(result.island).toMatchObject({ environment: "sandbox", token: "USDC" });
     expect(result.island).not.toHaveProperty("amount");
-    expect(db.select().from(intents).all()).toHaveLength(0);
+    expect(await db.select().from(intents)).toHaveLength(0);
     expect(JSON.stringify(result.data)).not.toContain((result.island as OnrampIsland).sessionToken);
   });
   it("returns an onramp island for the user's wallet without creating an intent", async () => {
@@ -43,7 +44,7 @@ describe("start_onramp", () => {
     expect(island.token).toBe("USDC");
     expect(island.amount).toBe("50");
     expect(r.summary).toBe("I've opened the add-money screen. Complete your deposit there.");
-    expect(db.select().from(intents).all()).toHaveLength(0);
+    expect(await db.select().from(intents)).toHaveLength(0);
     expect(kit.calls.find((c) => c.method === "createOnrampSession")?.params).toMatchObject({ appUserId: "demo", destinationAddress: ADDRESS });
   });
 
@@ -57,13 +58,13 @@ describe("recordOnrampEvent", () => {
   it("refreshes balances after sandbox submission without recording a settled deposit", async () => {
     const { h, ctx, db, islands } = await setup();
     await h.recordOnrampEvent(ctx, { type: "submitted", payload: { settlementExpected: false } });
-    expect(db.select().from(auditTable).all().map((a) => a.type)).not.toContain("onramp.settled");
+    expect((await db.select().from(auditTable)).map((a) => a.type)).not.toContain("onramp.settled");
     expect(islands.some((i) => i.kind === "balances")).toBe(true);
   });
   it("audits the event and publishes fresh balances when settled", async () => {
     const { h, ctx, db, islands } = await setup();
     await h.recordOnrampEvent(ctx, { type: "settled", payload: { amount: "50" } });
-    expect(db.select().from(auditTable).all().map((a) => a.type)).toContain("onramp.settled");
+    expect((await db.select().from(auditTable)).map((a) => a.type)).toContain("onramp.settled");
     expect(islands.some((i) => i.kind === "balances")).toBe(true);
   });
 });

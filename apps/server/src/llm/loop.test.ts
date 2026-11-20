@@ -139,9 +139,9 @@ describe("toOpenAITools", () => {
 describe("real harness tool surface", () => {
   it("exposes only the spec §8.1 tools and nothing that executes directly", async () => {
     const { FakeAppKit } = await import("@arcie/appkit");
-    const { createDb } = await import("@arcie/db");
+    const { createTestDb } = await import("@arcie/db/testing");
     const { createHarness, DbPolicyProvider, EventBus } = await import("@arcie/harness");
-    const db = createDb(":memory:");
+    const { db } = await createTestDb();
     const h = createHarness({ db, kit: new FakeAppKit(), policy: new DbPolicyProvider(db), bus: new EventBus() });
     const SPEC = [
       "get_balances", "get_receive_info", "find_contact", "list_contacts", "get_swap_quote", "list_earn_vaults",

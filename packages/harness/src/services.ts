@@ -69,10 +69,10 @@ export type RecipientResult = { kind: "ok"; recipient: Recipient } | { kind: "ch
 
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
-export function resolveRecipient(svc: Svc, userId: string, to: string): RecipientResult {
+export async function resolveRecipient(svc: Svc, userId: string, to: string): Promise<RecipientResult> {
   const t = to.trim();
   if (/\.eth$/i.test(t)) throw new ArcieError("INVALID_RECIPIENT", { spoken: "I can't send to ENS names yet. Use a contact or an address." });
-  const book = svc.db.select().from(contacts).where(eq(contacts.userId, userId)).all();
+  const book = await svc.db.select().from(contacts).where(eq(contacts.userId, userId));
 
   if (t.startsWith("0x")) {
     if (!isAddress(t, { strict: true }) || getAddress(t) !== t) throw new ArcieError("INVALID_RECIPIENT", { spoken: "That address needs its correct checksum. Please copy the checksummed address." });

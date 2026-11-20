@@ -10,11 +10,10 @@ const CHECK_TIMEOUT_MS = 10_000;
 /** Startup recovery; terminal results remain available after the in-memory event is gone. */
 export async function reconcileExecuting(deps: { db: Db; kit: AppKitPort; bus: EventBus; now?: () => Date }): Promise<number> {
   const now = (deps.now ?? (() => new Date()))();
-  const repo = new IntentRepo(deps.db);
-  const stuck = deps.db.select().from(intents).where(eq(intents.status, "executing")).all();
+  const stuck = await deps.db.select().from(intents).where(eq(intents.status, "executing"));
   let reconciled = 0;
 
-  function finish(i: Intent, actual: Record<string, string | null>, error?: ArcieError) {
+  async function finish(i: Intent, actual: Record<string, string | null>, error?: ArcieError) {
     const status = error ? "failed" : "succeeded";
     const receipt = buildReceipt({
       intentId: i.id, status,
@@ -23,18 +22,18 @@ export async function reconcileExecuting(deps: { db: Db; kit: AppKitPort; bus: E
       ...(i.txHash ? { txHash: i.txHash, explorerUrl: getChain(i.chain).explorerTx(i.txHash) } : {}),
       ...(error ? { error } : {}),
     });
-    const changed = deps.db.transaction(() => {
-      const won = repo.transition(i.id, "executing", status, {
+    const changed = await deps.db.transaction(async (tx) => {
+      const won = await new IntentRepo(tx).transition(i.id, "executing", status, {
         actuals: actual, preview: { ...i.preview, receipt },
         // Missing hashes cannot establish whether funds moved; keep their reservation.
         statusReason: !i.txHash ? "submission_unknown" : null,
         error: error ? { code: error.code, message: error.spoken } : null,
       });
-      if (won) deps.db.insert(audit).values({
+      if (won) await tx.insert(audit).values({
         userId: i.userId, sessionId: i.sessionId, intentId: i.id,
         type: `intent.${status}`, payload: { recovered: true, txHash: i.txHash, summary: error?.spoken ?? "Transaction completed." },
         createdAt: now.toISOString(),
-      }).run();
+      });
       return won;
     });
     if (changed) {
@@ -59,9 +58,9 @@ export async function reconcileExecuting(deps: { db: Db; kit: AppKitPort; bus: E
       const actual = i.kind === "swap"
         ? { "You got": amountOut ? `${amountOut} ${tokenName(String(i.params.tokenOut ?? ""))}` : null }
         : (i.actuals ?? {}) as Record<string, string | null>;
-      finish(i, actual, status === "FAILED" ? new ArcieError("UNKNOWN", { spoken: "That transaction failed onchain. Check your activity for details." }) : undefined);
+      await finish(i, actual, status === "FAILED" ? new ArcieError("UNKNOWN", { spoken: "That transaction failed onchain. Check your activity for details." }) : undefined);
     } else if (now.getTime() - new Date(i.createdAt).getTime() > ORPHAN_AFTER_MS) {
-      finish(i, {}, new ArcieError("UNKNOWN", { spoken: "I lost track of that request. Please check your activity before trying again." }));
+      await finish(i, {}, new ArcieError("UNKNOWN", { spoken: "I lost track of that request. Please check your activity before trying again." }));
     }
   }
   return reconciled;

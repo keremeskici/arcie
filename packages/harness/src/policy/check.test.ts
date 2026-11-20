@@ -1,5 +1,6 @@
 import { DEFAULT_LIMITS } from "@arcie/core";
-import { createDb, limits, seed } from "@arcie/db";
+import { limits, seed } from "@arcie/db";
+import { createTestDb } from "@arcie/db/testing";
 import { describe, expect, it } from "vitest";
 import { checkPolicy, type PolicyInput } from "./check.js";
 import { DbPolicyProvider } from "./db-provider.js";
@@ -99,15 +100,15 @@ describe("checkPolicy", () => {
 
 describe("DbPolicyProvider", () => {
   it("reads and validates the stored limits", async () => {
-    const db = createDb(":memory:");
+    const { db } = await createTestDb();
     await seed(db, { userId: "demo" });
     expect(await new DbPolicyProvider(db).getLimits("demo")).toEqual({ ...DEFAULT_LIMITS, source: "db" });
   });
 
   it("rejects malformed stored limits", async () => {
-    const db = createDb(":memory:");
+    const { db } = await createTestDb();
     await seed(db, { userId: "demo" });
-    db.update(limits).set({ json: { maxPerTxUsd: "lots" } as never }).run();
+    await db.update(limits).set({ json: { maxPerTxUsd: "lots" } as never });
     await expect(new DbPolicyProvider(db).getLimits("demo")).rejects.toThrow();
   });
 });

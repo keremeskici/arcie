@@ -1,19 +1,29 @@
-import Database from "better-sqlite3";
-import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { migrate } from "drizzle-orm/better-sqlite3/migrator";
-import { fileURLToPath } from "node:url";
+import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
 import * as schema from "./schema.js";
 
-export type Db = BetterSQLite3Database<typeof schema>;
+export type Db = PostgresJsDatabase<typeof schema>;
+export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+/** Repos and audit accept either, so they can run inside a transaction. */
+export type DbOrTx = Db | Tx;
 
-const MIGRATIONS = fileURLToPath(new URL("../drizzle", import.meta.url));
+export interface DbOptions {
+  /** Pool size. Keep it small on serverless (the Supabase pooler multiplexes). */
+  max?: number;
+  ssl?: "require" | false;
+}
 
-/** Opens the database and applies pending migrations. Use ":memory:" in tests. */
-export function createDb(url: string): Db {
-  const sqlite = new Database(url);
-  if (url !== ":memory:") sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("foreign_keys = ON");
-  const db = drizzle(sqlite, { schema });
-  migrate(db, { migrationsFolder: MIGRATIONS });
-  return db;
+/**
+ * Opens a pooled connection. Never migrates (migrations run explicitly via `migrateDb`).
+ * `prepare: false` keeps it compatible with the Supabase transaction pooler.
+ */
+export function createDb(url: string, opts: DbOptions = {}): { db: Db; close(): Promise<void> } {
+  const sql = postgres(url, {
+    max: opts.max ?? 5,
+    prepare: false,
+    ...(opts.ssl !== undefined ? { ssl: opts.ssl } : {}),
+    onnotice: () => {},
+  });
+  const db = drizzle(sql, { schema });
+  return { db, close: () => sql.end({ timeout: 5 }) };
 }

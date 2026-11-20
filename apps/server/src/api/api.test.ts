@@ -131,7 +131,7 @@ describe("REST API", () => {
     const body = await r.json();
     expect(body.summary).toMatch(/10 USD\b/);
     expect(body.data).toMatchObject({ estimatedOut: expect.any(String), minOut: expect.any(String) });
-    expect(harness.intents.listForUser("demo", 10)).toHaveLength(0);
+    expect(await harness.intents.listForUser("demo", 10)).toHaveLength(0);
   });
 
   it("POST /receive publishes a receive island for the user's wallet", async () => {
@@ -184,7 +184,7 @@ describe("shared proposal validation (F7)", () => {
     const result = await call("POST", "/intents", body, S);
     expect(result.status).toBe(400);
     expect(await result.json()).toMatchObject({ error: { code: "INVALID_ARGS" } });
-    expect(harness.intents.listForUser("demo", 10)).toHaveLength(0);
+    expect(await harness.intents.listForUser("demo", 10)).toHaveLength(0);
     expect(kit.calls).toHaveLength(0);
   });
 

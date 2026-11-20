@@ -1,6 +1,7 @@
 import { FakeAppKit, type WalletRef } from "@arcie/appkit";
 import type { ChoiceIsland, ConfirmIsland, IslandPayload, ReceiptIsland } from "@arcie/core";
-import { createDb, intents, limits, seed, wallets } from "@arcie/db";
+import { intents, limits, seed, wallets } from "@arcie/db";
+import { createTestDb } from "@arcie/db/testing";
 import { DEFAULT_LIMITS } from "@arcie/core";
 import { describe, expect, it } from "vitest";
 import type { HarnessCtx } from "./context.js";
@@ -13,9 +14,9 @@ const W: WalletRef = { chain: "Arc_Testnet", address: "0x00000000000000000000000
 const T0 = new Date("2026-11-07T10:00:00.000Z");
 
 async function setup(opts: { confirmChannels?: "any" | "screen" } = {}) {
-  const db = createDb(":memory:");
+  const { db } = await createTestDb();
   await seed(db, { userId: "demo" });
-  db.insert(wallets).values({ id: "w1", userId: "demo", chain: "Arc_Testnet", circleWalletId: "w1", address: W.address, accountType: "EOA" }).run();
+  await db.insert(wallets).values({ id: "w1", userId: "demo", chain: "Arc_Testnet", circleWalletId: "w1", address: W.address, accountType: "EOA" });
   const kit = new FakeAppKit();
   kit.setBalance(W, "USDC", "100");
   kit.setBalance(W, "EURC", "20");
@@ -34,7 +35,7 @@ async function setup(opts: { confirmChannels?: "any" | "screen" } = {}) {
     ...over,
   });
   const advance = (sec: number) => (clock = new Date(clock.getTime() + sec * 1000));
-  const allIntents = () => db.select().from(intents).all();
+  const allIntents = async () => db.select().from(intents);
   const balance = async (token: string) => (await kit.getBalances(W)).find((b) => b.token === token)?.amount;
   return { db, kit, islands, h, ctx, advance, allIntents, balance };
 }
@@ -58,14 +59,14 @@ describe("propose → confirm → receipt", () => {
 
     const same = await h.runTool(ctx({ userTurn: 1 }), "confirm_intent", {});
     expect(same.summary).toMatch(/say confirm after hearing the details/i);
-    expect(allIntents()[0]!.status).toBe("awaiting_confirmation");
+    expect((await allIntents())[0]!.status).toBe("awaiting_confirmation");
 
     const next = await h.runTool(ctx({ userTurn: 2 }), "confirm_intent", {});
     const receipt = next.island as ReceiptIsland;
     expect(receipt.kind).toBe("receipt");
     expect(receipt.status).toBe("succeeded");
     expect(receipt.txHash).toMatch(/^0x/);
-    expect(allIntents()[0]!.status).toBe("succeeded");
+    expect((await allIntents())[0]!.status).toBe("succeeded");
     expect(await balance("USDC")).toBe("94.99");
   });
 
@@ -74,7 +75,7 @@ describe("propose → confirm → receipt", () => {
     await h.runTool(ctx(), "propose_send", { to: "Bob", amount: "5", token: "USDC" });
     const r = await h.runTool(ctx({ userTurn: 2 }), "confirm_intent", { id: "made-up" });
     expect(r.data).toMatchObject({ error: "NOT_FOUND" });
-    expect(allIntents()[0]!.status).toBe("awaiting_confirmation");
+    expect((await allIntents())[0]!.status).toBe("awaiting_confirmation");
   });
 
   it("answers NOT_FOUND when nothing is waiting for confirmation", async () => {
@@ -95,7 +96,7 @@ describe("propose → confirm → receipt", () => {
     const { h, ctx, allIntents, islands } = await setup();
     await h.runTool(ctx(), "propose_send", { to: "Bob", amount: "5", token: "USDC" });
     await h.runTool(ctx({ userTurn: 2 }), "cancel_intent", {});
-    expect(allIntents()[0]!.status).toBe("cancelled");
+    expect((await allIntents())[0]!.status).toBe("cancelled");
     expect(islands).toContainEqual(expect.objectContaining({ kind: "dismiss", reason: "cancelled" }));
   });
 
@@ -103,7 +104,7 @@ describe("propose → confirm → receipt", () => {
     const { h, ctx, allIntents } = await setup();
     await h.runTool(ctx(), "propose_send", { to: "Bob", amount: "5", token: "USDC" });
     await h.runTool(ctx({ userTurn: 2 }), "propose_send", { to: "Bob", amount: "6", token: "USDC" });
-    expect(allIntents().map((i) => i.status).sort()).toEqual(["awaiting_confirmation", "cancelled"]);
+    expect((await allIntents()).map((i) => i.status).sort()).toEqual(["awaiting_confirmation", "cancelled"]);
   });
 });
 
@@ -115,7 +116,7 @@ describe("recipients and amounts", () => {
     expect(c.kind).toBe("choice");
     expect(c.options.map((o) => o.label).sort()).toEqual(["Alice", "Alice Smith"]);
     expect(r.summary).toBe("I found two contacts: Alice and Alice Smith. Which one?");
-    expect(allIntents()).toHaveLength(0);
+    expect(await allIntents()).toHaveLength(0);
   });
 
   it("records a tapped choice", async () => {
@@ -145,7 +146,7 @@ describe("recipients and amounts", () => {
     expect(confirmIsland(p).risks).toContain("This is a new recipient.");
     const voice = await h.runTool(ctx({ userTurn: 2 }), "confirm_intent", {});
     expect(voice.summary).toMatch(/tap confirm on the card/i);
-    expect(allIntents()[0]!.status).toBe("awaiting_confirmation");
+    expect((await allIntents())[0]!.status).toBe("awaiting_confirmation");
     const screen = await h.confirm(ctx({ channel: "screen" }), confirmIsland(p).intentId, "screen");
     expect(screen.status).toBe("succeeded");
   });
@@ -154,7 +155,7 @@ describe("recipients and amounts", () => {
     const { h, ctx, allIntents } = await setup();
     const r = await h.runTool(ctx(), "propose_send", { to: "Bob", amount: "five", token: "USDC" });
     expect(r.data).toMatchObject({ error: "INVALID_AMOUNT" });
-    expect(allIntents()).toHaveLength(0);
+    expect(await allIntents()).toHaveLength(0);
   });
 
   it("sends the whole USDC balance minus the network fee and says so (Review Focus 4)", async () => {
@@ -175,12 +176,12 @@ describe("policy", () => {
     const { h, ctx, allIntents } = await setup();
     const r = await h.runTool(ctx(), "propose_send", { to: "Bob", amount: "60", token: "USDC" });
     expect(r.summary).toContain("$50");
-    expect(allIntents()[0]!.status).toBe("rejected");
+    expect((await allIntents())[0]!.status).toBe("rejected");
   });
 
   it("does not count withdrawals from your own vault against the limits", async () => {
     const { h, ctx, kit, db } = await setup();
-    db.update(limits).set({ json: { ...DEFAULT_LIMITS, maxPerTxUsd: 50 } }).run();
+    await db.update(limits).set({ json: { ...DEFAULT_LIMITS, maxPerTxUsd: 50 } });
     const vault = kit.vaults[0]!.address;
     for (const turn of [1, 3]) {
       const p = await h.runTool(ctx({ userTurn: turn }), "propose_earn_deposit", { vault, amount: "45" });
@@ -225,7 +226,7 @@ describe("read tools", () => {
     const { h, ctx, allIntents } = await setup();
     const r = await h.runTool(ctx(), "get_swap_quote", { tokenIn: "USDC", tokenOut: "EURC", amountIn: "10" });
     expect(r.data).toMatchObject({ estimatedOut: "9.2" });
-    expect(allIntents()).toHaveLength(0);
+    expect(await allIntents()).toHaveLength(0);
   });
 
   it("returns every token balance", async () => {
@@ -258,7 +259,7 @@ describe("confirmation channel policy", () => {
     const p = await h.runTool(ctx(), "propose_send", { to: "Bob", amount: "5", token: "USDC" });
     const v = await h.runTool(ctx({ userTurn: 2 }), "confirm_intent", {});
     expect(v.summary).toBe("Tap confirm on the card to finish.");
-    expect(allIntents()[0]!.status).toBe("awaiting_confirmation");
+    expect((await allIntents())[0]!.status).toBe("awaiting_confirmation");
     expect((await h.confirm(ctx({ channel: "screen" }), confirmIsland(p).intentId, "screen")).status).toBe("succeeded");
   });
 });
@@ -270,8 +271,8 @@ describe("session-bound confirmation (F4)", () => {
     const b = confirmIsland(await h.runTool(ctx({ sessionId: "s2" }), "propose_send", { to: "Bob", amount: "6" }));
     const result = await h.runTool(ctx({ sessionId: "s2", userTurn: 2 }), "confirm_intent", { id: a.intentId });
     expect(result.data).toMatchObject({ error: "NOT_FOUND" });
-    expect(h.intents.get(a.intentId)?.status).toBe("awaiting_confirmation");
-    expect(h.intents.get(b.intentId)?.status).toBe("awaiting_confirmation");
+    expect((await h.intents.get(a.intentId))?.status).toBe("awaiting_confirmation");
+    expect((await h.intents.get(b.intentId))?.status).toBe("awaiting_confirmation");
     expect(kit.calls).toHaveLength(0);
   });
 
@@ -280,14 +281,14 @@ describe("session-bound confirmation (F4)", () => {
     const a = confirmIsland(await h.runTool(ctx(), "propose_send", { to: "Bob", amount: "5" }));
     const result = await h.runTool(ctx({ sessionId: "s2" }), "cancel_intent", { id: a.intentId });
     expect(result.data).toMatchObject({ error: "NOT_FOUND" });
-    expect(h.intents.get(a.intentId)?.status).toBe("awaiting_confirmation");
+    expect((await h.intents.get(a.intentId))?.status).toBe("awaiting_confirmation");
   });
 });
 
 describe("spending claims at confirmation (F1)", () => {
   it.each([false, true])("enforces the daily cap across previously prepared sessions (concurrent=%s)", async (concurrent) => {
     const { h, ctx, db, kit, balance } = await setup();
-    db.update(limits).set({ json: { ...DEFAULT_LIMITS, dailyCapUsd: 10 } }).run();
+    await db.update(limits).set({ json: { ...DEFAULT_LIMITS, dailyCapUsd: 10 } });
     const a = confirmIsland(await h.runTool(ctx(), "propose_send", { to: "Bob", amount: "6" }));
     const bctx = ctx({ sessionId: "s2", userTurn: 2 });
     const b = confirmIsland(await h.runTool(bctx, "propose_send", { to: "Bob", amount: "6" }));
@@ -303,7 +304,7 @@ describe("spending claims at confirmation (F1)", () => {
 
   it("reserves the cap for a submitted but unsettled transaction", async () => {
     const { h, ctx, db, kit } = await setup();
-    db.update(limits).set({ json: { ...DEFAULT_LIMITS, dailyCapUsd: 10 } }).run();
+    await db.update(limits).set({ json: { ...DEFAULT_LIMITS, dailyCapUsd: 10 } });
     const a = confirmIsland(await h.runTool(ctx(), "propose_swap", { tokenIn: "USDC", tokenOut: "EURC", amountIn: "6" }));
     const bctx = ctx({ sessionId: "s2", channel: "screen" });
     const b = confirmIsland(await h.runTool(bctx, "propose_send", { to: "Bob", amount: "6" }));
@@ -317,7 +318,7 @@ describe("spending claims at confirmation (F1)", () => {
   it("applies limits tightened after the preview", async () => {
     const { h, ctx, db, kit } = await setup();
     const a = confirmIsland(await h.runTool(ctx(), "propose_send", { to: "Bob", amount: "6" }));
-    db.update(limits).set({ json: { ...DEFAULT_LIMITS, maxPerTxUsd: 5 } }).run();
+    await db.update(limits).set({ json: { ...DEFAULT_LIMITS, maxPerTxUsd: 5 } });
     const result = await h.runTool(ctx({ userTurn: 2 }), "confirm_intent", { id: a.intentId });
     expect(result.data).toMatchObject({ error: "POLICY_DENIED" });
     expect(kit.calls).toHaveLength(0);
@@ -333,7 +334,7 @@ describe("approved swap floor (F2)", () => {
     expect(result.status).toBe("failed");
     expect((result.island as ReceiptIsland).error?.code).toBe("SLIPPAGE_EXCEEDED");
     expect(await balance("USDC")).toBe("100");
-    expect(h.intents.get(a.intentId)?.params).toMatchObject({ minOut: "9.108" });
+    expect((await h.intents.get(a.intentId))?.params).toMatchObject({ minOut: "9.108" });
   });
 });
 
@@ -374,7 +375,7 @@ describe("overlapping quote confirmations (F5)", () => {
     await h.cancel(ctx(), a.intentId);
     release();
     await pending;
-    expect(h.intents.get(a.intentId)?.status).toBe("cancelled");
+    expect((await h.intents.get(a.intentId))?.status).toBe("cancelled");
     expect(islands.filter((i) => i.kind === "confirm")).toHaveLength(1);
     expect(kit.calls).toHaveLength(0);
   });
@@ -385,16 +386,16 @@ describe("submitted transaction recovery (F3)", () => {
     const { h, ctx, kit, balance } = await setup();
     const a = confirmIsland(await h.runTool(ctx(), "propose_swap", { tokenIn: "USDC", tokenOut: "EURC", amountIn: "6" }));
     kit.setPendingNext();
-    let savedDuringPoll: ReturnType<typeof h.intents.get>;
+    let savedDuringPoll: Awaited<ReturnType<typeof h.intents.get>>;
     kit.waitForSwap = async (_w, txHash) => {
-      savedDuringPoll = h.intents.get(a.intentId);
+      savedDuringPoll = await h.intents.get(a.intentId);
       throw new Error(`Polling timed out for ${txHash}`);
     };
     const result = await h.confirm(ctx({ channel: "screen" }), a.intentId, "screen");
     expect(savedDuringPoll!).toMatchObject({ status: "executing", txHash: expect.stringMatching(/^0x/) });
     expect(result.status).toBe("executing");
     expect(result.island).toBeUndefined();
-    expect(h.intents.get(a.intentId)).toMatchObject({ status: "executing", txHash: savedDuringPoll!.txHash });
+    expect(await h.intents.get(a.intentId)).toMatchObject({ status: "executing", txHash: savedDuringPoll!.txHash });
     expect(await balance("USDC")).toBe("93.99");
     const retry = await h.runTool(ctx({ userTurn: 2 }), "confirm_intent", { id: a.intentId });
     expect(retry.data).toMatchObject({ error: "NOT_FOUND" });
@@ -403,13 +404,13 @@ describe("submitted transaction recovery (F3)", () => {
 
   it("keeps an uncertain submission reserved instead of inviting a retry", async () => {
     const { h, ctx, kit, db } = await setup();
-    db.update(limits).set({ json: { ...DEFAULT_LIMITS, dailyCapUsd: 10 } }).run();
+    await db.update(limits).set({ json: { ...DEFAULT_LIMITS, dailyCapUsd: 10 } });
     const a = confirmIsland(await h.runTool(ctx(), "propose_send", { to: "Bob", amount: "6" }));
     kit.failNext("RPC_UNAVAILABLE");
     const result = await h.confirm(ctx({ channel: "screen" }), a.intentId, "screen");
     expect(result.status).toBe("executing");
     expect(result.summary).toMatch(/check.*activity/i);
-    expect(h.intents.get(a.intentId)?.statusReason).toBe("submission_unknown");
+    expect((await h.intents.get(a.intentId))?.statusReason).toBe("submission_unknown");
     const next = await h.runTool(ctx({ sessionId: "s2" }), "propose_send", { to: "Bob", amount: "6" });
     expect(next.data).toMatchObject({ error: "POLICY_DENIED" });
   });
@@ -434,16 +435,16 @@ describe("interrupted preparations (F6)", () => {
     if (event === "newer") await h.runTool(ctx({ userTurn: 2 }), "propose_send", { to: "Bob", amount: "6" });
     release();
     await pending;
-    expect(allIntents().some((i) => i.params.amount === "5")).toBe(false);
+    expect((await allIntents()).some((i) => i.params.amount === "5")).toBe(false);
     expect(islands.filter((i) => i.kind === "confirm")).toHaveLength(event === "newer" ? 1 : 0);
-    if (event === "newer") expect(allIntents()[0]?.status).toBe("awaiting_confirmation");
+    if (event === "newer") expect((await allIntents())[0]?.status).toBe("awaiting_confirmation");
   });
 });
 
 describe("swap asset policy (F9)", () => {
   it("refuses to acquire a forbidden output token", async () => {
     const { h, ctx, db } = await setup();
-    db.update(limits).set({ json: { ...DEFAULT_LIMITS, allowedTokens: ["USDC"] } }).run();
+    await db.update(limits).set({ json: { ...DEFAULT_LIMITS, allowedTokens: ["USDC"] } });
     const result = await h.runTool(ctx(), "propose_swap", { tokenIn: "USDC", tokenOut: "cirBTC", amountIn: "5" });
     expect(result.data).toMatchObject({ error: "POLICY_DENIED" });
     expect(result.island).toBeUndefined();
@@ -452,7 +453,7 @@ describe("swap asset policy (F9)", () => {
   it("checks the output allowlist again when confirming", async () => {
     const { h, ctx, db, kit } = await setup();
     const a = confirmIsland(await h.runTool(ctx(), "propose_swap", { tokenIn: "USDC", tokenOut: "EURC", amountIn: "5" }));
-    db.update(limits).set({ json: { ...DEFAULT_LIMITS, allowedTokens: ["USDC"] } }).run();
+    await db.update(limits).set({ json: { ...DEFAULT_LIMITS, allowedTokens: ["USDC"] } });
     const result = await h.runTool(ctx({ userTurn: 2 }), "confirm_intent", { id: a.intentId });
     expect(result.data).toMatchObject({ error: "POLICY_DENIED" });
     expect(kit.calls).toHaveLength(0);
@@ -467,7 +468,7 @@ describe("raw recipient checksums (F10)", () => {
     const { h, ctx, allIntents } = await setup();
     const result = await h.runTool(ctx(), "propose_send", { to, amount: "5" });
     expect(result.data).toMatchObject({ error: "INVALID_RECIPIENT" });
-    expect(allIntents()).toHaveLength(0);
+    expect(await allIntents()).toHaveLength(0);
   });
   it("accepts a raw address with its exact checksum", async () => {
     const { h, ctx } = await setup();
@@ -494,7 +495,7 @@ describe("withdrawal gas availability (F15)", () => {
     const vault = kit.vaults[0]!.address;
     const a = confirmIsland(await h.runTool(ctx(), "propose_earn_deposit", { vault, amount: "5" }));
     await h.confirm(ctx({ channel: "screen" }), a.intentId, "screen");
-    db.update(limits).set({ json: { ...DEFAULT_LIMITS, dailyCapUsd: 0, maxPerTxUsd: 0 } }).run();
+    await db.update(limits).set({ json: { ...DEFAULT_LIMITS, dailyCapUsd: 0, maxPerTxUsd: 0 } });
     kit.setBalance(W, "USDC", "0.01");
     const result = await h.runTool(ctx(), "propose_earn_withdraw", { vault, amount: "all" });
     expect(result.island?.kind).toBe("confirm");

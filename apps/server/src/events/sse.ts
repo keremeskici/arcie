@@ -27,16 +27,19 @@ export function eventRoutes(deps: AppDeps & { authorizeSession?: (sessionId: str
         wake?.();
       };
 
-      // A client that connects late still sees the card that's waiting for it.
-      const open = deps.harness.intents.openForSession(sessionId, new Date());
-      const openIsland = (open?.preview as { island?: IslandPayload } | null)?.island;
-      if (openIsland) queue.push(openIsland);
-      else {
-        const receipt = deps.harness.intents.latestReceiptForSession(sessionId);
-        if (receipt) queue.push(receipt);
-      }
-
+      // Subscribe before the (now async) lookup so an island published meanwhile is not lost.
       const off = deps.bus.subscribe(sessionId, push);
+
+      // A client that connects late still sees the card that's waiting for it.
+      try {
+        const open = await deps.harness.intents.openForSession(sessionId, new Date());
+        const openIsland = (open?.preview as { island?: IslandPayload } | null)?.island;
+        const initial = openIsland ?? (await deps.harness.intents.latestReceiptForSession(sessionId));
+        if (initial) queue.unshift(initial);
+      } catch (e) {
+        off();
+        throw e;
+      }
       let closed = false;
       let pingDue = false;
       const ping = setInterval(() => {

@@ -44,7 +44,7 @@ export function errorFor(code: string, message: string, status: ContentfulStatus
 export async function screenCtx(deps: AppDeps, c: Context): Promise<HarnessCtx> {
   const { userId } = await deps.identify(c);
   const sessionId = c.req.header("x-arcie-session") ?? `default:${userId}`;
-  const row = deps.db.select().from(sessions).where(eq(sessions.id, sessionId)).get();
+  const row = (await deps.db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1))[0];
   // A session id is a capability: never let one user act inside another user's session.
   if (row && row.userId !== userId) throw new AuthError("That session belongs to someone else.");
   return { userId, sessionId, channel: "screen", userTurn: row?.userTurn ?? 0, now: () => new Date(), runId: randomUUID() };

@@ -1,5 +1,5 @@
 import type { ActionKind, ChainId, ReceiptIsland } from "@arcie/core";
-import { intents, type Db, type IntentStatus } from "@arcie/db";
+import { intents, type DbOrTx, type IntentStatus } from "@arcie/db";
 import { and, desc, eq, gte, ne, or } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { paramsHash } from "./hash.js";
@@ -24,11 +24,11 @@ export interface IntentDraft {
 }
 
 export class IntentRepo {
-  constructor(private readonly db: Db) {}
+  constructor(private readonly db: DbOrTx) {}
 
-  create(d: IntentDraft): Intent {
+  async create(d: IntentDraft): Promise<Intent> {
     const now = d.now.toISOString();
-    return this.db
+    const [row] = await this.db
       .insert(intents)
       .values({
         id: randomUUID(),
@@ -48,86 +48,85 @@ export class IntentRepo {
         updatedAt: now,
         expiresAt: new Date(d.now.getTime() + d.ttlSec * 1000).toISOString(),
       })
-      .returning()
-      .get();
+      .returning();
+    return row!;
   }
 
-  get(id: string): Intent | null {
-    return this.db.select().from(intents).where(eq(intents.id, id)).get() ?? null;
+  async get(id: string): Promise<Intent | null> {
+    return (await this.db.select().from(intents).where(eq(intents.id, id)).limit(1))[0] ?? null;
   }
 
   /** The session's intent awaiting confirmation that hasn't expired yet. */
-  openForSession(sessionId: string, now: Date): Intent | null {
-    const rows = this.db
+  async openForSession(sessionId: string, now: Date): Promise<Intent | null> {
+    const rows = await this.db
       .select()
       .from(intents)
-      .where(and(eq(intents.sessionId, sessionId), eq(intents.status, "awaiting_confirmation")))
-      .all();
+      .where(and(eq(intents.sessionId, sessionId), eq(intents.status, "awaiting_confirmation")));
     const open = rows.filter((r) => !r.expiresAt || r.expiresAt > now.toISOString());
     return open.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
   }
 
   /** Compare-and-set: returns false if the intent wasn't in `from` (someone else moved it first). */
-  transition(id: string, from: IntentStatus, to: IntentStatus, patch: IntentPatch = {}): boolean {
-    const res = this.db
+  async transition(id: string, from: IntentStatus, to: IntentStatus, patch: IntentPatch = {}): Promise<boolean> {
+    const res = await this.db
       .update(intents)
       .set({ ...patch, status: to, updatedAt: new Date().toISOString() })
       .where(and(eq(intents.id, id), eq(intents.status, from)))
-      .run();
-    return res.changes === 1;
+      .returning({ id: intents.id });
+    return res.length === 1;
   }
 
   /** Updates fields without changing status (e.g. a refreshed quote). */
-  patch(id: string, patch: IntentPatch): void {
-    this.db.update(intents).set({ ...patch, updatedAt: new Date().toISOString() }).where(eq(intents.id, id)).run();
+  async patch(id: string, patch: IntentPatch): Promise<void> {
+    await this.db.update(intents).set({ ...patch, updatedAt: new Date().toISOString() }).where(eq(intents.id, id));
   }
 
   /** Cancels every other awaiting intent in the session (only one Confirm island is ever open); returns their ids. */
-  supersedeOpen(sessionId: string, newIntentId: string): string[] {
-    const rows = this.db
+  async supersedeOpen(sessionId: string, newIntentId: string): Promise<string[]> {
+    const rows = await this.db
       .select({ id: intents.id })
       .from(intents)
-      .where(and(eq(intents.sessionId, sessionId), eq(intents.status, "awaiting_confirmation")))
-      .all();
-    return rows
-      .filter((r) => r.id !== newIntentId)
-      .filter((r) => this.transition(r.id, "awaiting_confirmation", "cancelled", { statusReason: "superseded", supersededBy: newIntentId }))
-      .map((r) => r.id);
+      .where(and(eq(intents.sessionId, sessionId), eq(intents.status, "awaiting_confirmation")));
+    const superseded: string[] = [];
+    for (const r of rows) {
+      if (r.id === newIntentId) continue;
+      if (await this.transition(r.id, "awaiting_confirmation", "cancelled", { statusReason: "superseded", supersededBy: newIntentId })) superseded.push(r.id);
+    }
+    return superseded;
   }
 
   /** Latest awaiting intent in the session, even if its TTL passed (so a late "yes" gets QUOTE_EXPIRED, not NOT_FOUND). */
-  latestAwaiting(sessionId: string): Intent | null {
+  latestAwaiting(sessionId: string): Promise<Intent | null> {
     return this.openForSession(sessionId, new Date(0));
   }
 
-  latestReceiptForSession(sessionId: string): ReceiptIsland | null {
-    const row = this.db.select().from(intents)
+  async latestReceiptForSession(sessionId: string): Promise<ReceiptIsland | null> {
+    const [row] = await this.db.select().from(intents)
       .where(and(eq(intents.sessionId, sessionId), or(eq(intents.status, "succeeded"), eq(intents.status, "failed"))))
-      .orderBy(desc(intents.updatedAt)).limit(1).get();
+      .orderBy(desc(intents.updatedAt)).limit(1);
     return (row?.preview?.receipt as ReceiptIsland | undefined) ?? null;
   }
 
   /** Outflows only: withdrawals from the user's own vault back to their wallet don't use up limits. */
-  spentTodayUsd(userId: string, now: Date): number {
+  async spentTodayUsd(userId: string, now: Date): Promise<number> {
     const since = new Date(now.getTime() - 24 * 3600_000).toISOString();
-    return this.db
+    const rows = await this.db
       .select({ usdValue: intents.usdValue })
       .from(intents)
       .where(and(eq(intents.userId, userId), ne(intents.kind, "earn_withdraw"), or(
         and(eq(intents.status, "succeeded"), gte(intents.createdAt, since)),
         eq(intents.status, "executing"),
         eq(intents.statusReason, "submission_unknown"),
-      )))
-      .all()
-      .reduce((sum, r) => sum + Number(r.usdValue ?? 0), 0);
+      )));
+    return rows.reduce((sum, r) => sum + Number(r.usdValue ?? 0), 0);
   }
 
-  listForUser(userId: string, limit: number): Intent[] {
-    return this.db
+  async listForUser(userId: string, limit: number): Promise<Intent[]> {
+    const rows = await this.db
       .select()
       .from(intents)
-      .where(eq(intents.userId, userId))
-      .all()
+      .where(eq(intents.userId, userId));
+    return rows
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit);
   }
