@@ -1,7 +1,7 @@
 import { FakeAppKit, type WalletRef } from "@arcie/appkit";
-import { createDb, intents, choices, seed, wallets } from "@arcie/db";
+import { createDb, intents, choices, seed, sessionState, wallets, type Db } from "@arcie/db";
 import { createTestDb } from "@arcie/db/testing";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { describe, expect, it, onTestFinished } from "vitest";
 import type { HarnessCtx } from "./context.js";
 import { EventBus } from "./events.js";
@@ -98,5 +98,51 @@ describe("database-coordinated proposals", () => {
     }
     const cancelledResults = results.filter((r) => (r.data as { cancelled?: boolean } | undefined)?.cancelled === true);
     expect(cancelledResults.length + rows.length).toBe(10);
+  });
+
+  describe("cancel serializes with publish", () => {
+    const lockWaiters = async (db: Db) => {
+      const rows = await db.execute<{ n: number }>(sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`);
+      return rows[0]!.n;
+    };
+    const waitForWaiters = async (db: Db, n: number) => {
+      for (let i = 0; i < 400; i++) {
+        if ((await lockWaiters(db)) >= n) return;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      throw new Error(`timed out waiting for ${n} lock waiters`);
+    };
+
+    // Holds the session_state row lock while A's publish and B's cancel both queue on it.
+    it.each([false, true])("a cancel issued while a proposal is publishing leaves no live card (prior card: %s)", async (priorCard) => {
+      const { dbA, a, b, ctx } = await twoInstances();
+      if (priorCard) await b.h.propose(ctx(), "send", { to: "Bob", amount: "4", token: "USDC" });
+      const gate = latch(a.kit);
+      const proposal = a.h.propose(ctx({ userTurn: 2 }), "send", { to: "Bob", amount: "5", token: "USDC" });
+      await gate.started;
+
+      let releaseLock!: () => void;
+      let locked!: () => void;
+      const hasLock = new Promise<void>((r) => { locked = r; });
+      const hold = new Promise<void>((r) => { releaseLock = r; });
+      const holder = dbA.transaction(async (tx) => {
+        await tx.select().from(sessionState).where(eq(sessionState.sessionId, "s1")).for("update");
+        locked();
+        await hold;
+      });
+      await hasLock;
+      gate.release();
+      await waitForWaiters(dbA, 1); // A is at publishProposal
+      const cancelled = b.h.cancel(ctx({ userTurn: 3 }));
+      await waitForWaiters(dbA, 2); // and the cancel is queued behind it
+      releaseLock();
+      await holder;
+      const [published, result] = await Promise.all([proposal, cancelled]);
+
+      expect(await dbA.select().from(intents).where(eq(intents.status, "awaiting_confirmation"))).toHaveLength(0);
+      // Whichever won the lock, the user is never told "nothing to cancel" while a card is live.
+      expect(result.summary).not.toMatch(/nothing to cancel/);
+      void published;
+    });
   });
 });

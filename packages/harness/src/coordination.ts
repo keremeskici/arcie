@@ -23,8 +23,12 @@ export async function beginProposal(db: Db, sessionId: string): Promise<number> 
   return row!.generation;
 }
 
-/** Invalidates any preparation in flight (cancel). Returns true when one was in flight. */
-export async function bumpGeneration(db: Db, sessionId: string): Promise<boolean> {
+/**
+ * Cancel: invalidates any preparation in flight and runs `fn` under the same session_state row lock, so it
+ * serializes with `publishProposal` (a card published first is visible to `fn`; a later publish is refused).
+ * `fn` receives whether a preparation was in flight. Do not call the network inside `fn`.
+ */
+export async function cancelUnderLock<T>(db: Db, sessionId: string, fn: (tx: Tx, preparing: boolean) => Promise<T>): Promise<T> {
   return db.transaction(async (tx) => {
     await tx.insert(sessionState).values({ sessionId }).onConflictDoNothing();
     const [row] = await tx.select().from(sessionState).where(eq(sessionState.sessionId, sessionId)).for("update");
@@ -32,7 +36,7 @@ export async function bumpGeneration(db: Db, sessionId: string): Promise<boolean
       .update(sessionState)
       .set({ proposalGeneration: row!.proposalGeneration + 1, preparingGeneration: null })
       .where(eq(sessionState.sessionId, sessionId));
-    return row!.preparingGeneration !== null;
+    return fn(tx, row!.preparingGeneration !== null);
   });
 }
 

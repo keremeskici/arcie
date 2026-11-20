@@ -7,7 +7,7 @@ import { parseUnits } from "viem";
 import { ACTIONS, swapIsland } from "./actions.js";
 import { audit } from "./audit.js";
 import type { HarnessCtx } from "./context.js";
-import { beginProposal, bumpGeneration, finishProposal, publishProposal } from "./coordination.js";
+import { beginProposal, cancelUnderLock, finishProposal, publishProposal } from "./coordination.js";
 import { buildReceipt, nextStepFor } from "./disclosure/receipt.js";
 import { EventBus, StepTracker } from "./events.js";
 import { paramsHash } from "./intents/hash.js";
@@ -277,16 +277,26 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
   }
 
   async function cancel(ctx: HarnessCtx, intentId?: string): Promise<ToolResult> {
-    const intent = intentId ? await repo.get(intentId) : await repo.latestAwaiting(ctx.sessionId);
-    if (intentId && (!intent || intent.userId !== ctx.userId || intent.sessionId !== ctx.sessionId)) throw new ArcieError("NOT_FOUND");
-    const stopped = await bumpGeneration(db, ctx.sessionId);
-    if (!intent || intent.userId !== ctx.userId || intent.status !== "awaiting_confirmation") {
+    if (intentId) {
+      const named = await repo.get(intentId);
+      if (!named || named.userId !== ctx.userId || named.sessionId !== ctx.sessionId) throw new ArcieError("NOT_FOUND");
+    }
+    // Bump the generation and cancel the card under one session lock, so a concurrent publish can't slip a card in between.
+    const { stopped, cancelledId } = await cancelUnderLock(db, ctx.sessionId, async (tx, preparing) => {
+      const txRepo = new IntentRepo(tx);
+      const intent = intentId ? await txRepo.get(intentId) : await txRepo.latestAwaiting(ctx.sessionId);
+      if (intent && intent.userId === ctx.userId && intent.status === "awaiting_confirmation"
+        && await txRepo.transition(intent.id, "awaiting_confirmation", "cancelled", { statusReason: "user" })) {
+        await audit(tx, ctx, "intent.cancelled", {}, intent.id);
+        return { stopped: preparing, cancelledId: intent.id };
+      }
+      return { stopped: preparing, cancelledId: null };
+    });
+    if (!cancelledId) {
       return { summary: stopped ? "Okay, I stopped preparing that. Nothing was moved." : "There's nothing to cancel.", data: { cancelled: stopped } };
     }
-    await repo.transition(intent.id, "awaiting_confirmation", "cancelled", { statusReason: "user" });
-    dismiss(ctx, intent.id, "cancelled");
-    await audit(db, ctx, "intent.cancelled", {}, intent.id);
-    return { summary: "Okay, I cancelled that. Nothing was moved.", data: { cancelled: true, intentId: intent.id } };
+    dismiss(ctx, cancelledId, "cancelled");
+    return { summary: "Okay, I cancelled that. Nothing was moved.", data: { cancelled: true, intentId: cancelledId } };
   }
 
   async function answerChoice(ctx: HarnessCtx, choiceId: string, optionId: string): Promise<void> {
