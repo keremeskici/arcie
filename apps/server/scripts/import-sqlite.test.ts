@@ -1,11 +1,11 @@
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { delimiter, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { DEFAULT_LIMITS } from "@arcie/core";
-import { audit, createDb, intents, sessionState } from "@arcie/db";
+import { audit, createDb, intents, sessionState, users } from "@arcie/db";
 import { createTestDb } from "@arcie/db/testing";
 import Database from "better-sqlite3";
 import { eq, sql } from "drizzle-orm";
@@ -93,7 +93,7 @@ async function runImport(sqlitePath: string, url?: string, runtimeUrl?: string) 
   return promisify(execFile)("pnpm", ["--silent", "db:import-sqlite", sqlitePath], {
     cwd: workspace,
     env: {
-      PATH: process.env.PATH,
+      PATH: [dirname(process.execPath), process.env.PATH].join(delimiter),
       ...(url ? { DATABASE_MIGRATION_URL: url } : {}),
       ...(runtimeUrl ? { DATABASE_URL: runtimeUrl } : {}),
     },
@@ -215,6 +215,34 @@ it("waits for an in-progress writer in a Postgres-only table and refuses its com
   expect(await target.db.select({ id: sessionState.sessionId }).from(sessionState))
     .toEqual([{ id: "in-progress-writer" }]);
 });
+
+it("refuses a target if an additional application table contains rows", async () => {
+  const target = await createTestDb();
+  const sqlitePath = await fixture();
+  // Quoted relation names must be handled safely even when they fall outside the mapped schema.
+  await target.db.execute(sql`create table arcie."new""ledger" (value text)`);
+  await target.db.execute(sql`insert into arcie."new""ledger" values ('synthetic')`);
+
+  await expect(importSqlite({ sqlitePath, target: target.db })).rejects.toThrow(/^TARGET_NOT_EMPTY$/);
+  expect(await target.db.select().from(users)).toEqual([]);
+  expect(await target.db.execute(sql`select value from arcie."new""ledger"`)).toEqual([{ value: "synthetic" }]);
+});
+
+it("refuses an unexpected empty table instead of assuming the target schema is compatible", async () => {
+  const target = await createTestDb();
+  const sqlitePath = await fixture();
+  await target.db.execute(sql`create table arcie.future_ledger (value text)`);
+
+  await expect(importSqlite({ sqlitePath, target: target.db })).rejects.toThrow(/^TARGET_SCHEMA_MISMATCH$/);
+  expect(await target.db.select().from(users)).toEqual([]);
+});
+
+it("advertises the quiet root invocation in the CLI usage message", async () => {
+  await expect(runImport("")).rejects.toMatchObject({
+    stdout: "",
+    stderr: "Usage: pnpm --silent db:import-sqlite <backup.db>\n",
+  });
+}, 15_000);
 
 it("prints only table counts from the workspace CLI", async () => {
   const target = await createTestDb();

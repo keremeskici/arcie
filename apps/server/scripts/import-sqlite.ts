@@ -1,7 +1,8 @@
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
-  audit, choices, confirmClaims, contacts, createDb, databaseEndpoint, intents, limits,
+  arcie, audit, choices, confirmClaims, contacts, createDb, databaseEndpoint, intents, limits,
   sessionEvents, sessions, sessionState, users, walletProvisioning, wallets,
   type Db, type Tx,
 } from "@arcie/db";
@@ -26,6 +27,7 @@ const targetTables = [
   ...legacyTables.map(([, table]) => table),
   sessionState, sessionEvents, confirmClaims, walletProvisioning,
 ];
+const targetTableNames = new Set<string>(targetTables.map(getTableName));
 const BATCH_SIZE = 500;
 
 /** Safe to report without exposing the cause, which can include record values or connection settings. */
@@ -165,22 +167,39 @@ async function importBackup(source: Database.Database, tx: Tx): Promise<Record<s
   return counts;
 }
 
+async function lockEmptyTarget(tx: Tx) {
+  // Lock the application tables in a fixed order. READ COMMITTED picks up writes
+  // that commit while the import is waiting for a table lock.
+  await tx.execute(sql`lock table ${sql.join(targetTables, sql`, `)} in access exclusive mode`);
+  await tx.execute(sql`set local row_security = off`);
+  const catalog = await tx.execute<{ name: string }>(sql`
+    select c.relname as name
+    from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = ${arcie.schemaName} and c.relkind in ('r', 'p')
+    order by c.relname
+  `);
+  const additionalTables = catalog
+    .filter(({ name }) => !targetTableNames.has(name))
+    .map(({ name }) => sql`${sql.identifier(arcie.schemaName)}.${sql.identifier(name)}`);
+  if (additionalTables.length) {
+    await tx.execute(sql`lock table ${sql.join(additionalTables, sql`, `)} in access exclusive mode`);
+  }
+  for (const table of [...targetTables, ...additionalTables]) {
+    const [result] = await tx.execute<{ occupied: boolean }>(sql`
+      select exists (select 1 from ${table}) as occupied
+    `);
+    if (result?.occupied !== false) throw new ImportError("TARGET_NOT_EMPTY");
+  }
+  if (additionalTables.length) throw new ImportError("TARGET_SCHEMA_MISMATCH");
+}
+
 export async function importSqlite({ sqlitePath, target }: {
   sqlitePath: string;
   target: Db;
 }): Promise<{ counts: Record<string, number> }> {
   try {
     return await target.transaction(async (tx) => {
-      // Lock in a fixed order, including the audit table that needs an exclusive lock for RESTART.
-      // READ COMMITTED sees any writer that committed while these locks were being acquired.
-      await tx.execute(sql`lock table ${sql.join(targetTables, sql`, `)} in access exclusive mode`);
-      await tx.execute(sql`set local row_security = off`);
-      for (const table of targetTables) {
-        const [result] = await tx.execute<{ occupied: boolean }>(sql`
-          select exists (select 1 from ${table}) as occupied
-        `);
-        if (result?.occupied !== false) throw new ImportError("TARGET_NOT_EMPTY");
-      }
+      await lockEmptyTarget(tx);
 
       const source = openBackup(sqlitePath);
       try {
@@ -198,7 +217,7 @@ export async function importSqlite({ sqlitePath, target }: {
 
 async function main() {
   const [, , sqlitePath, ...extra] = process.argv;
-  if (!sqlitePath || extra.length) throw new ImportError("Usage: pnpm db:import-sqlite <backup.db>");
+  if (!sqlitePath || extra.length) throw new ImportError("Usage: pnpm --silent db:import-sqlite <backup.db>");
 
   const url = process.env.DATABASE_MIGRATION_URL;
   if (!url) throw new ImportError("Set DATABASE_MIGRATION_URL to a dedicated Postgres connection.");
@@ -220,7 +239,7 @@ async function main() {
   for (const [table, count] of Object.entries(counts)) console.log(`${table} ${count}`);
 }
 
-if (import.meta.main) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error: unknown) => {
     console.error(error instanceof ImportError ? error.message : "IMPORT_FAILED");
     process.exitCode = 1;
