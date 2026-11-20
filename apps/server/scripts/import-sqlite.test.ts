@@ -237,6 +237,24 @@ it("refuses an unexpected empty table instead of assuming the target schema is c
   expect(await target.db.select().from(users)).toEqual([]);
 });
 
+it("refuses foreign tables before opening the backup or contacting the foreign server", async () => {
+  const target = await createTestDb();
+  await target.db.execute(sql`create extension postgres_fdw`);
+  await target.db.execute(sql`
+    create server import_fixture_foreign_server foreign data wrapper postgres_fdw
+    options (host '127.0.0.1', port '1', dbname 'fixture')
+  `);
+  await target.db.execute(sql`
+    create foreign table arcie.foreign_ledger (value text) server import_fixture_foreign_server
+  `);
+
+  const folder = await mkdtemp(join(tmpdir(), "arcie-sqlite-import-"));
+  onTestFinished(() => rm(folder, { recursive: true, force: true }));
+  const sqlitePath = join(folder, "missing-fixture.db");
+  await expect(importSqlite({ sqlitePath, target: target.db })).rejects.toThrow(/^TARGET_SCHEMA_MISMATCH$/);
+  expect(await target.db.select().from(users)).toEqual([]);
+});
+
 it("advertises the quiet root invocation in the CLI usage message", async () => {
   await expect(runImport("")).rejects.toMatchObject({
     stdout: "",

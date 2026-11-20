@@ -172,12 +172,14 @@ async function lockEmptyTarget(tx: Tx) {
   // that commit while the import is waiting for a table lock.
   await tx.execute(sql`lock table ${sql.join(targetTables, sql`, `)} in access exclusive mode`);
   await tx.execute(sql`set local row_security = off`);
-  const catalog = await tx.execute<{ name: string }>(sql`
-    select c.relname as name
+  const catalog = await tx.execute<{ name: string; kind: string }>(sql`
+    select c.relname as name, c.relkind as kind
     from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid = c.relnamespace
-    where n.nspname = ${arcie.schemaName} and c.relkind in ('r', 'p')
+    where n.nspname = ${arcie.schemaName} and c.relkind in ('r', 'p', 'f')
     order by c.relname
   `);
+  // Checking a foreign table's contents could contact another server.
+  if (catalog.some(({ kind }) => kind === "f")) throw new ImportError("TARGET_SCHEMA_MISMATCH");
   const additionalTables = catalog
     .filter(({ name }) => !targetTableNames.has(name))
     .map(({ name }) => sql`${sql.identifier(arcie.schemaName)}.${sql.identifier(name)}`);
