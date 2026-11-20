@@ -1,4 +1,5 @@
-import { sessionState, type Db, type Tx } from "@arcie/db";
+import { confirmClaims, intents, sessionState, type Db, type Tx } from "@arcie/db";
+import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 
 /**
@@ -61,4 +62,32 @@ export async function finishProposal(db: Db, sessionId: string, generation: numb
     .update(sessionState)
     .set({ preparingGeneration: null })
     .where(and(eq(sessionState.sessionId, sessionId), eq(sessionState.preparingGeneration, generation)));
+}
+
+/**
+ * Takes the intent's confirmation claim, or returns `null` while another instance holds a live one. A claim
+ * expires `ttlMs` after it was taken and can then be taken over; both sides of that comparison use database
+ * time (`now()`), never an instance clock. Returns the fencing token with the intent's revision at claim time.
+ */
+export async function claimConfirmation(db: Db, intentId: string, ttlMs = 30_000): Promise<{ token: string; revision: number } | null> {
+  const token = randomUUID();
+  return db.transaction(async (tx) => {
+    const claimed = await tx
+      .insert(confirmClaims)
+      .values({ intentId, token, expiresAt: sql`now() + (${ttlMs} * interval '1 millisecond')` })
+      .onConflictDoUpdate({
+        target: confirmClaims.intentId,
+        set: { token, expiresAt: sql`now() + (${ttlMs} * interval '1 millisecond')` },
+        setWhere: sql`${confirmClaims.expiresAt} < now()`,
+      })
+      .returning({ token: confirmClaims.token });
+    if (claimed.length === 0) return null;
+    const [row] = await tx.select({ revision: intents.revision }).from(intents).where(eq(intents.id, intentId));
+    return row ? { token, revision: row.revision } : null;
+  });
+}
+
+/** Releases the claim only if `token` still owns it (a takeover by another instance is left alone). */
+export async function releaseConfirmation(db: Db | Tx, intentId: string, token: string): Promise<void> {
+  await db.delete(confirmClaims).where(and(eq(confirmClaims.intentId, intentId), eq(confirmClaims.token, token)));
 }

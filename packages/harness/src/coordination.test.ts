@@ -6,6 +6,8 @@ import { describe, expect, it, onTestFinished } from "vitest";
 import type { HarnessCtx } from "./context.js";
 import { EventBus } from "./events.js";
 import { createHarness } from "./harness.js";
+import { claimConfirmation, releaseConfirmation } from "./coordination.js";
+import { IntentRepo } from "./intents/repo.js";
 import { DbPolicyProvider } from "./policy/db-provider.js";
 
 const W: WalletRef = { chain: "Arc_Testnet", address: "0x000000000000000000000000000000000000dEaD", circleWalletId: "w1" };
@@ -144,5 +146,132 @@ describe("database-coordinated proposals", () => {
       expect(result.summary).not.toMatch(/nothing to cancel/);
       void published;
     });
+  });
+});
+
+describe("confirmation claims and fencing", () => {
+  const row = (id: string) => ({
+    id, sessionId: "s1", userId: "demo", kind: "send" as const, chain: "Arc_Testnet" as const,
+    params: {}, paramsHash: "h", status: "awaiting_confirmation" as const,
+  });
+  const swapSetup = async () => {
+    const s = await twoInstances();
+    const p = await s.a.h.propose(s.ctx(), "swap", { tokenIn: "USDC", tokenOut: "EURC", amountIn: "10" });
+    const id = (p.island as { intentId: string }).intentId;
+    const later = (over: Partial<HarnessCtx> = {}) => s.ctx({ channel: "screen", now: () => new Date(T0.getTime() + 31_000), ...over });
+    return { ...s, id, later };
+  };
+  /** Holds A's estimate open, then returns a quote below the slippage floor. */
+  function swapLatch(kit: FakeAppKit) {
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    kit.estimateSwap = async () => { entered(); await gate; return { estimatedOut: "8", minOut: "7.92", fees: [] }; };
+    return { started, release };
+  }
+  const swaps = (...kits: FakeAppKit[]) => kits.flatMap((k) => k.calls.filter((c) => c.method === "swap"));
+
+  it("duplicate confirmations on two instances execute once", async () => {
+    const { dbA, a, b, ctx } = await twoInstances();
+    const p = await a.h.propose(ctx(), "send", { to: "Bob", amount: "5", token: "USDC" });
+    const id = (p.island as { intentId: string }).intentId;
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const send = a.kit.send.bind(a.kit);
+    a.kit.send = async (w, params) => { entered(); await gate; return send(w, params); };
+    const voice = a.h.confirm(ctx({ userTurn: 2 }), id, "voice");
+    await started;
+    const screen = await b.h.confirm(ctx({ channel: "screen", userTurn: 2 }), id, "screen");
+    expect(screen.summary).toMatch(/already checking|Already on it/);
+    release();
+    expect((await voice).status).toBe("succeeded");
+    const sends = [a.kit, b.kit].flatMap((k) => k.calls.filter((c) => c.method === "send"));
+    expect(sends).toHaveLength(1);
+    expect((await dbA.select().from(intents))[0]!.status).toBe("succeeded");
+  });
+
+  it("stale consent loses to a requote", async () => {
+    const { dbA, a, b, id, later } = await swapSetup();
+    const before = (await dbA.select().from(intents).where(eq(intents.id, id)))[0]!.revision;
+    const gate = swapLatch(a.kit);
+    const first = a.h.confirm(later(), id, "screen");
+    await gate.started;
+    const second = await b.h.confirm(later(), id, "screen"); // consent on the old quote
+    expect(second.summary).toBe("I'm already checking that confirmation.");
+    gate.release();
+    const r = await first;
+    expect(r.status).toBe("awaiting_confirmation");
+    expect(swaps(a.kit, b.kit)).toHaveLength(0);
+    const [intent] = await dbA.select().from(intents).where(eq(intents.id, id));
+    expect(intent!.status).toBe("awaiting_confirmation");
+    expect(intent!.params.minOut).toBe("7.92");
+    expect(intent!.revision).toBe(before + 1);
+  });
+
+  it("cancel during preparation blocks execution", async () => {
+    const { dbA, a, b, ctx, id, later } = await swapSetup();
+    const gate = swapLatch(a.kit);
+    const pending = a.h.confirm(later(), id, "screen");
+    await gate.started;
+    await b.h.cancel(ctx(), id);
+    gate.release();
+    await pending.catch(() => undefined);
+    expect(swaps(a.kit, b.kit)).toHaveLength(0);
+    expect((await dbA.select().from(intents).where(eq(intents.id, id)))[0]!.status).toBe("cancelled");
+  });
+
+  it("claim expiry ignores instance clock", async () => {
+    const { a, b, id, later } = await swapSetup();
+    const gate = swapLatch(a.kit);
+    const first = a.h.confirm(later(), id, "screen");
+    await gate.started;
+    const skewed = await b.h.confirm(later({ now: () => new Date(T0.getTime() + 10 * 60_000) }), id, "screen");
+    expect(skewed.summary).toBe("I'm already checking that confirmation.");
+    gate.release();
+    await first;
+  });
+
+  it("claims are exclusive and fence writes by token and revision", async () => {
+    const { dbA } = await twoInstances();
+    await dbA.insert(intents).values(row("i1"));
+    const repo = new IntentRepo(dbA);
+    const c1 = await claimConfirmation(dbA, "i1");
+    expect(c1).toMatchObject({ revision: 0 });
+    expect(await claimConfirmation(dbA, "i1")).toBeNull();
+    expect(await repo.patchFenced("i1", { token: c1!.token, revision: 5 }, { preview: { x: 1 } })).toBe(false);
+    expect(await repo.patchFenced("i1", c1!, { preview: { x: 1 } })).toBe(true);
+    expect((await repo.get("i1"))!.revision).toBe(1);
+    expect(await repo.patchFenced("i1", c1!, { preview: { x: 2 } })).toBe(false); // revision moved on
+    await releaseConfirmation(dbA, "i1", "00000000-0000-0000-0000-000000000000"); // not ours: no-op
+    expect(await claimConfirmation(dbA, "i1")).toBeNull();
+    await releaseConfirmation(dbA, "i1", c1!.token);
+    expect(await claimConfirmation(dbA, "i1")).not.toBeNull();
+  });
+
+  it("revision counts only changes to params, params_hash, preview or expires_at", async () => {
+    const { dbA } = await twoInstances();
+    await dbA.insert(intents).values(row("i1"));
+    const repo = new IntentRepo(dbA);
+    await repo.patch("i1", { quoteAt: "2026-11-07T10:00:00.000Z" });
+    expect((await repo.get("i1"))!.revision).toBe(0);
+    await repo.patch("i1", { expiresAt: "2026-11-07T10:02:00.000Z" });
+    await repo.transition("i1", "awaiting_confirmation", "awaiting_confirmation", { params: { a: 1 }, paramsHash: "h2" });
+    expect((await repo.get("i1"))!.revision).toBe(2);
+  });
+
+  it("expired claim can be taken over", async () => {
+    const { dbA } = await twoInstances();
+    await dbA.insert(intents).values(row("i1"));
+    const repo = new IntentRepo(dbA);
+    const first = await claimConfirmation(dbA, "i1", 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const second = await claimConfirmation(dbA, "i1");
+    expect(second).not.toBeNull();
+    expect(second!.token).not.toBe(first!.token);
+    expect(await repo.patchFenced("i1", first!, { preview: { x: 1 } })).toBe(false);
+    expect(await repo.patchFenced("i1", second!, { preview: { x: 1 } })).toBe(true);
   });
 });

@@ -1,12 +1,17 @@
 import type { ActionKind, ChainId, ReceiptIsland } from "@arcie/core";
-import { intents, type DbOrTx, type IntentStatus } from "@arcie/db";
-import { and, desc, eq, gte, ne, or } from "drizzle-orm";
+import { confirmClaims, intents, type DbOrTx, type IntentStatus } from "@arcie/db";
+import { and, desc, eq, gte, ne, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { paramsHash } from "./hash.js";
 
 export type { IntentStatus } from "@arcie/db";
 export type Intent = typeof intents.$inferSelect;
-type IntentPatch = Partial<Omit<Intent, "id" | "status" | "createdAt">>;
+type IntentPatch = Partial<Omit<Intent, "id" | "status" | "createdAt" | "revision">>;
+
+/** Changes to what the user consented to bump `revision` (in SQL, so concurrent writers can't lose an increment). */
+const REVISED_FIELDS = ["params", "paramsHash", "preview", "expiresAt"] as const;
+const revisionBump = (patch: IntentPatch) =>
+  REVISED_FIELDS.some((k) => k in patch) ? { revision: sql`${intents.revision} + 1` } : {};
 
 export interface IntentDraft {
   /** Lets the caller reference the id (e.g. as `supersededBy`) before the row exists. */
@@ -72,7 +77,7 @@ export class IntentRepo {
   async transition(id: string, from: IntentStatus, to: IntentStatus, patch: IntentPatch = {}): Promise<boolean> {
     const res = await this.db
       .update(intents)
-      .set({ ...patch, status: to, updatedAt: new Date().toISOString() })
+      .set({ ...patch, ...revisionBump(patch), status: to, updatedAt: new Date().toISOString() })
       .where(and(eq(intents.id, id), eq(intents.status, from)))
       .returning({ id: intents.id });
     return res.length === 1;
@@ -80,7 +85,25 @@ export class IntentRepo {
 
   /** Updates fields without changing status (e.g. a refreshed quote). */
   async patch(id: string, patch: IntentPatch): Promise<void> {
-    await this.db.update(intents).set({ ...patch, updatedAt: new Date().toISOString() }).where(eq(intents.id, id));
+    await this.db.update(intents).set({ ...patch, ...revisionBump(patch), updatedAt: new Date().toISOString() }).where(eq(intents.id, id));
+  }
+
+  /**
+   * Fenced update for the confirm path: writes only while the intent is still awaiting confirmation, the caller's
+   * claim token is live (database time) and the revision is the one the caller saw. Increments the revision.
+   */
+  async patchFenced(id: string, expected: { token: string; revision: number }, patch: IntentPatch): Promise<boolean> {
+    const res = await this.db
+      .update(intents)
+      .set({ ...patch, revision: sql`${intents.revision} + 1`, updatedAt: new Date().toISOString() })
+      .where(and(
+        eq(intents.id, id),
+        eq(intents.status, "awaiting_confirmation"),
+        eq(intents.revision, expected.revision),
+        sql`exists (select 1 from ${confirmClaims} where ${confirmClaims.intentId} = ${intents.id} and ${confirmClaims.token} = ${expected.token} and ${confirmClaims.expiresAt} > now())`,
+      ))
+      .returning({ id: intents.id });
+    return res.length === 1;
   }
 
   /** Cancels every other awaiting intent in the session (only one Confirm island is ever open); returns their ids. */

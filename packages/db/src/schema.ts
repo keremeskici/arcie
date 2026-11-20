@@ -1,6 +1,6 @@
 import type { ActionKind, AgentLimits, ChainId, Channel } from "@arcie/core";
 import { sql } from "drizzle-orm";
-import { bigint, integer, jsonb, pgSchema, text, uniqueIndex } from "drizzle-orm/pg-core";
+import { bigint, integer, jsonb, pgSchema, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 const now = () => new Date().toISOString();
 
@@ -105,12 +105,24 @@ export const intents = table(
     createdAt: text("created_at").notNull().$defaultFn(now),
     updatedAt: text("updated_at").notNull().$defaultFn(now),
     expiresAt: text("expires_at"),
+    /** Bumped by every change to params, params_hash, preview or expires_at; a confirmation claim is only valid for the revision it saw. */
+    revision: integer("revision").notNull().default(0),
   },
   (t) => [
     // A session never has two Confirm cards open: the database refuses the second.
     uniqueIndex("intents_one_pending_per_session").on(t.sessionId).where(sql`${t.status} = 'awaiting_confirmation'`),
   ],
 );
+
+/**
+ * Expiring execution claim on an intent, so two server instances never act on one confirmation.
+ * `token` fences writes; `expires_at` is compared against database time only.
+ */
+export const confirmClaims = table("confirm_claims", {
+  intentId: text("intent_id").primaryKey().references(() => intents.id),
+  token: uuid("token").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+});
 
 export const choices = table("choices", {
   id: text("id").primaryKey(),

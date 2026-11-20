@@ -1,13 +1,13 @@
 import type { AppKitPort } from "@arcie/appkit";
 import { ArcieError, type ActionKind, type Channel, type IslandPayload, type TokenSymbol, tokenName } from "@arcie/core";
-import { choices, type Db } from "@arcie/db";
-import { eq } from "drizzle-orm";
+import { choices, confirmClaims, type Db } from "@arcie/db";
+import { and, eq, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { parseUnits } from "viem";
 import { ACTIONS, swapIsland } from "./actions.js";
 import { audit } from "./audit.js";
 import type { HarnessCtx } from "./context.js";
-import { beginProposal, cancelUnderLock, finishProposal, publishProposal } from "./coordination.js";
+import { beginProposal, cancelUnderLock, claimConfirmation, finishProposal, publishProposal, releaseConfirmation } from "./coordination.js";
 import { buildReceipt, nextStepFor } from "./disclosure/receipt.js";
 import { EventBus, StepTracker } from "./events.js";
 import { paramsHash } from "./intents/hash.js";
@@ -24,6 +24,7 @@ import type { ToolDef, ToolResult } from "./tools/registry.js";
 
 const TTL_SEC = 120;
 const QUOTE_FRESH_MS = 30_000;
+type Claim = { token: string; revision: number };
 const SCREEN_ONLY = "Tap confirm on the card to finish.";
 
 export type ConfirmResult = { status: IntentStatus; summary: string; island?: IslandPayload };
@@ -43,7 +44,6 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
   const svc: Svc = { ...deps, repo: new IntentRepo(deps.db), confirmChannels: deps.confirmChannels ?? "any" };
   const { repo, bus, db } = svc;
   const trackers = new Map<string, StepTracker>();
-  const confirming = new Set<string>();
 
   const assertActive = (ctx: HarnessCtx) => {
     if (ctx.signal?.aborted) throw new ArcieError("NOT_FOUND", { spoken: "That request was interrupted. Nothing new was submitted." });
@@ -122,7 +122,7 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
   }
 
   /** Swap quotes older than 30s are re-checked; a drop beyond the slippage cap sends the user back to the card. */
-  async function refreshIfStale(ctx: HarnessCtx, intent: Intent): Promise<ConfirmResult | null> {
+  async function refreshIfStale(ctx: HarnessCtx, intent: Intent, claim: Claim): Promise<ConfirmResult | null> {
     if (intent.kind !== "swap" || !intent.quoteAt) return null;
     const now = ctx.now();
     if (now.getTime() - new Date(intent.quoteAt).getTime() <= QUOTE_FRESH_MS) return null;
@@ -142,7 +142,7 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
     const expiresAt = new Date(now.getTime() + TTL_SEC * 1000).toISOString();
     const island = swapIsland(intent.id, p, est, ["The price moved; here's the updated quote."], expiresAt);
     const params = { ...intent.params, minOut: est.minOut };
-    await repo.patch(intent.id, {
+    const written = await repo.patchFenced(intent.id, claim, {
       params,
       paramsHash: paramsHash(params),
       preview: { estimatedOut: est.estimatedOut, minOut: est.minOut, fees: est.fees, island, estimated: { "You got": `${est.estimatedOut} ${tokenName(p.tokenOut)}` } },
@@ -150,6 +150,8 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
       previewTurn: ctx.userTurn,
       expiresAt,
     });
+    // Cancelled, superseded, expired or revised while the provider answered: this consent is stale.
+    if (!written) throw new ArcieError("POLICY_DENIED", { spoken: "The details changed. Please check the new card and confirm again." });
     bus.publish(ctx.sessionId, island);
     await audit(db, ctx, "intent.requoted", { estimatedOut: est.estimatedOut }, intent.id);
     return { status: "awaiting_confirmation", summary: island.spokenPrompt, island };
@@ -159,16 +161,17 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
     assertActive(ctx);
     const candidate = intentId ? await repo.get(intentId) : await repo.latestAwaiting(ctx.sessionId);
     if (!candidate || candidate.userId !== ctx.userId || candidate.sessionId !== ctx.sessionId) throw new ArcieError("NOT_FOUND");
-    if (confirming.has(candidate.id)) return { status: candidate.status, summary: "I'm already checking that confirmation." };
-    confirming.add(candidate.id);
+    // The claim is shared through the database, so a second instance (or tab) can't act on this confirmation.
+    const claim = await claimConfirmation(db, candidate.id);
+    if (!claim) return { status: candidate.status, summary: "I'm already checking that confirmation." };
     try {
-      return await confirmOnce(ctx, candidate.id, channel);
+      return await confirmOnce(ctx, candidate.id, channel, claim);
     } finally {
-      confirming.delete(candidate.id);
+      await releaseConfirmation(db, candidate.id, claim.token);
     }
   }
 
-  async function confirmOnce(ctx: HarnessCtx, intentId: string, channel: Channel): Promise<ConfirmResult> {
+  async function confirmOnce(ctx: HarnessCtx, intentId: string, channel: Channel, claim: Claim): Promise<ConfirmResult> {
     const started = ctx.now();
     let intent = intentId ? await repo.get(intentId) : await repo.latestAwaiting(ctx.sessionId);
     if (intent && (intent.userId !== ctx.userId || intent.sessionId !== ctx.sessionId)) intent = null;
@@ -186,7 +189,7 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
     const needsScreen = svc.confirmChannels === "screen" || intent.params.requireScreen === true;
     if (needsScreen && channel !== "screen") return { status: "awaiting_confirmation", summary: SCREEN_ONLY };
 
-    const requoted = await refreshIfStale(ctx, intent);
+    const requoted = await refreshIfStale(ctx, intent, claim);
     if (requoted) return requoted;
 
     const currentLimits = await svc.policy.getLimits(ctx.userId);
@@ -197,6 +200,10 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
       assertActive(ctx);
       const current = await txRepo.get(intent.id);
       if (current?.status !== "awaiting_confirmation") return false;
+      // Consent only counts while our claim is live and the card is the revision the claim saw.
+      const [live] = await tx.select({ token: confirmClaims.token }).from(confirmClaims)
+        .where(and(eq(confirmClaims.intentId, intent.id), eq(confirmClaims.token, claim.token), sql`${confirmClaims.expiresAt} > now()`));
+      if (!live || current.revision !== claim.revision) throw new ArcieError("POLICY_DENIED", { spoken: "The details changed. Please check the new card and confirm again." });
       assertConfirmable(current, { channel, userTurn: ctx.userTurn, now: ctx.now() });
       if (current.paramsHash !== intent.paramsHash) throw new ArcieError("POLICY_DENIED", { spoken: "The details changed. Please check the new card and confirm again." });
       const denied = checkLimits({
