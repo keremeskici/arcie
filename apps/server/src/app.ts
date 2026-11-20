@@ -1,4 +1,5 @@
 import type { AppKitPort } from "@arcie/appkit";
+import type { TokenSymbol } from "@arcie/core";
 import type { Db } from "@arcie/db";
 import type { EventBus, Harness } from "@arcie/harness";
 import { Hono, type Context } from "hono";
@@ -32,6 +33,8 @@ export interface AppDeps {
   /** Public client config for the UI. */
   privyAppId?: string | undefined;
   elevenLabsAgentId?: string | undefined;
+  /** Display-only USD prices (CoinGecko Demo, cached) for /balances. Absent: App Kit rates only. */
+  tokenUsdPrice?: ((token: TokenSymbol) => Promise<number | null>) | undefined;
   /** First-login setup: user row, limits, Circle wallet, welcome drip. */
   onboard: (id: Identity) => ReturnType<typeof onboard>;
 }

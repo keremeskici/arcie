@@ -44,7 +44,8 @@ export type ServerConfig = {
 };
 
 export type Balances = {
-  chains: { chain: string; tokens: { token: string; amount: string; usd: number | null }[] }[];
+  /** usdPrice: price of one unit, when the server has one (BTC via CoinGecko). */
+  chains: { chain: string; tokens: { token: string; amount: string; usd: number | null; usdPrice?: number | null }[] }[];
   totalUsd: number | null;
   knownSubtotalUsd: number;
 };

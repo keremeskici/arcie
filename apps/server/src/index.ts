@@ -7,6 +7,7 @@ import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import OpenAI from "openai";
 import { createApp } from "./app.js";
+import { createTokenUsdPrices } from "./prices/coingecko.js";
 import { createAdminDrip } from "./auth/drip.js";
 import { createIdentify } from "./auth/identify.js";
 import { onboard } from "./auth/onboard.js";
@@ -53,6 +54,7 @@ const app = createApp({
   llmSecret: env.LLM_SHARED_SECRET,
   privyAppId: env.PRIVY_APP_ID,
   elevenLabsAgentId: env.ELEVENLABS_AGENT_ID,
+  tokenUsdPrice: env.COINGECKO_API_KEY ? createTokenUsdPrices({ apiKey: env.COINGECKO_API_KEY }) : undefined,
   identify: createIdentify({ mode: env.AUTH_MODE, verifier, demoUserId: env.DEMO_USER_ID }),
   onboard: (id) => {
     if (!env.CIRCLE_WALLET_SET_ID) throw new Error("CIRCLE_WALLET_SET_ID is missing; run `pnpm provision` first.");

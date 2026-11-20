@@ -56,14 +56,24 @@ export function meRoutes(deps: AppDeps) {
     const w = await getWallet(deps.db, userId, HOME_CHAIN);
     if (!w) throw new ArcieError("NOT_FOUND", { spoken: "Your wallet isn't set up yet." });
     const balances = await deps.kit.getBalances(w);
+    const appKitRate = (token: TokenSymbol) =>
+      deps.kit
+        .getUsdRates(w.chain, [token])
+        .then((r) => r[token])
+        .then((rate) => (rate === undefined || !Number.isFinite(rate) ? null : rate))
+        .catch(() => null);
     const tokens = await Promise.all(
       balances.map(async (b) => {
+        const token = b.token as TokenSymbol;
+        if (deps.tokenUsdPrice) {
+          // CoinGecko first (one cached call for all tokens), App Kit if it has no price. null = unknown, never a guess.
+          const usdPrice = (await deps.tokenUsdPrice(token)) ?? (await appKitRate(token));
+          const usd = Number(b.amount) === 0 ? 0 : usdPrice === null ? null : round2(Number(b.amount) * usdPrice);
+          return { ...b, usd, usdPrice };
+        }
         if (Number(b.amount) === 0) return { ...b, usd: 0 };
-        const rate = await deps.kit
-          .getUsdRates(w.chain, [b.token as TokenSymbol])
-          .then((r) => r[b.token as TokenSymbol])
-          .catch(() => null);
-        return { ...b, usd: rate === null || !Number.isFinite(rate) ? null : round2(Number(b.amount) * rate) };
+        const rate = await appKitRate(token);
+        return { ...b, usd: rate === null ? null : round2(Number(b.amount) * rate) };
       }),
     );
     const knownSubtotalUsd = round2(tokens.reduce((s, t) => s + (t.usd ?? 0), 0));

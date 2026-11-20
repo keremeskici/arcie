@@ -95,7 +95,10 @@ export function WalletScreen({
             <li key={t.token} className="flex items-center justify-between px-4 py-3.5">
               <div className="flex items-center gap-3">
                 <TokenIcon symbol={t.token} size={32} />
-                <span className="font-medium">{tokenLabel(t.token)}</span>
+                <div>
+                  <p className="font-medium leading-tight">{tokenLabel(t.token)}</p>
+                  {t.token !== "USDC" && "usdPrice" in t ? <p className="text-xs text-muted tabular-nums">{usd(t.usdPrice ?? null)}</p> : null}
+                </div>
               </div>
               <div className="text-right">
                 <p className="font-medium tabular-nums">{tokenAmount(t.amount)}</p>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { testApp } from "../testkit.js";
+import { DEMO_WALLET, testApp } from "../testkit.js";
 
 const S = { "x-arcie-session": "s1" };
 
@@ -23,6 +23,39 @@ describe("REST API", () => {
       { token: "cirBTC", amount: "0", usd: 0 },
     ]);
     expect(body.totalUsd).toBe(121.74);
+  });
+
+  const coingecko = { USDC: 0.9998, EURC: 1.08, cirBTC: 67000 } as const;
+
+  it("GET /balances prices every token from CoinGecko when a key is configured", async () => {
+    const { call, kit } = await testApp({ tokenUsdPrice: async (t) => coingecko[t] });
+    kit.setBalance(DEMO_WALLET, "cirBTC", "0.01");
+    const body = await (await call("GET", "/balances")).json();
+    expect(body.chains[0].tokens).toEqual([
+      { token: "USDC", amount: "100", usd: 99.98, usdPrice: 0.9998 },
+      { token: "EURC", amount: "20", usd: 21.6, usdPrice: 1.08 },
+      { token: "cirBTC", amount: "0.01", usd: 670, usdPrice: 67000 },
+    ]);
+    expect(body.totalUsd).toBe(791.58);
+  });
+
+  it("GET /balances shows a price even with a zero balance", async () => {
+    const { call } = await testApp({ tokenUsdPrice: async (t) => coingecko[t] });
+    expect((await (await call("GET", "/balances")).json()).chains[0].tokens[2]).toEqual({ token: "cirBTC", amount: "0", usd: 0, usdPrice: 67000 });
+  });
+
+  it("GET /balances falls back to App Kit when CoinGecko has no price, and never invents one", async () => {
+    const { call, kit } = await testApp({ tokenUsdPrice: async (t) => (t === "USDC" ? 0.9998 : null) });
+    kit.setUsdRate("cirBTC", Number.NaN); // App Kit has no BTC price either
+    kit.setBalance(DEMO_WALLET, "cirBTC", "0.01");
+    const body = await (await call("GET", "/balances")).json();
+    expect(body.chains[0].tokens).toEqual([
+      { token: "USDC", amount: "100", usd: 99.98, usdPrice: 0.9998 },
+      { token: "EURC", amount: "20", usd: 21.74, usdPrice: 1.087 },
+      { token: "cirBTC", amount: "0.01", usd: null, usdPrice: null },
+    ]);
+    expect(body.totalUsd).toBeNull();
+    expect(body.knownSubtotalUsd).toBe(121.72);
   });
 
   it("proposes from a button, confirms by tap, and refuses a second confirm with 409", async () => {
