@@ -16,7 +16,8 @@
     "evals": "tsx --env-file=../../.env scripts/evals.ts",
     "check-token": "tsx --env-file=../../.env scripts/check-token.ts",
     "build": "tsx scripts/build-assets.ts",
-    "db:migrate": "node --env-file-if-exists=../../.env --import tsx scripts/migrate.ts"
+    "db:migrate": "node --env-file-if-exists=../../.env --import tsx scripts/migrate.ts",
+    "db:import-sqlite": "node --import tsx scripts/import-sqlite.ts"
   },
   "dependencies": {
     "@arcie/appkit": "workspace:^",
@@ -35,6 +36,8 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "better-sqlite3": "^13.0.3",
     "tsx": "^4.23.15"
   }
 }

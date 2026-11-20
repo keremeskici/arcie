@@ -16,7 +16,8 @@
     "evals": "pnpm --filter @arcie/server evals",
     "check-token": "pnpm --filter @arcie/server check-token",
     "web": "pnpm --filter @arcie/web dev",
-    "db:migrate": "pnpm --filter @arcie/server db:migrate"
+    "db:migrate": "pnpm --filter @arcie/server db:migrate",
+    "db:import-sqlite": "pnpm --silent --filter @arcie/server db:import-sqlite"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
