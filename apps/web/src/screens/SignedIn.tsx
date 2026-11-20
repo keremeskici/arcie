@@ -1,6 +1,7 @@
 import { ConversationProvider } from "@elevenlabs/react";
 import * as React from "react";
 import { ActionSheet } from "@/components/ActionSheet";
+import { Button } from "@/components/Button";
 import { ReceiveSheet } from "@/components/ReceiveSheet";
 import { SendSheet } from "@/components/SendSheet";
 import { Splash } from "@/components/Splash";
@@ -39,6 +40,7 @@ export function SignedIn({ config }: { config: ServerConfig }) {
       live = false;
       pendingVoice.current?.();
       setSessionId(null);
+      setTokenGetter(async () => null);
     };
   }, []);
 
@@ -56,7 +58,13 @@ export function SignedIn({ config }: { config: ServerConfig }) {
     }, (error) => setBoot((old) => old && { ...old, voice: { sessionId: null, error } }));
   }
 
-  if (error) return <Splash message={error} />;
+  if (error) {
+    return (
+      <Splash message={error}>
+        {auth.mode === "demo" ? <Button variant="outline" onClick={() => void auth.logout()}>Back to sign-in</Button> : null}
+      </Splash>
+    );
+  }
   if (!boot) return <Splash message="Opening your wallet…" />;
 
   return (

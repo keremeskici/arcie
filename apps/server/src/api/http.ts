@@ -41,8 +41,9 @@ export function errorFor(code: string, message: string, status: ContentfulStatus
 }
 
 /** Builds the harness context for a tapped (screen) request. */
-export async function screenCtx(deps: AppDeps, c: Context): Promise<HarnessCtx> {
-  const { userId } = await deps.identify(c);
+export async function screenCtx(deps: AppDeps, c: Context, options?: { allowDemo: boolean }): Promise<HarnessCtx> {
+  const { userId, demoWallet } = await deps.identify(c);
+  if (demoWallet && options?.allowDemo === false) throw new AuthError("Sign in to use direct chat.");
   const supplied = c.req.header("x-arcie-session");
   const sessionId = supplied ?? `default:${userId}`;
   if (deps.authMode === "privy" && supplied === undefined) {

@@ -27,6 +27,7 @@ const schema = z.object({
   DATABASE_SSL_CA: optional,
   PORT: z.coerce.number().int().default(8787),
   DEMO_USER_ID: z.string().default("demo"),
+  DEMO_WALLET_SESSION_SECRET: z.preprocess((v) => v === "" ? undefined : v, z.string().min(32).optional()),
   CONFIRM_CHANNELS: z.enum(["any", "screen"]).default("any"),
   AUTH_MODE: z.enum(["dev", "privy"]).default("dev"),
   PRIVY_APP_ID: optional,

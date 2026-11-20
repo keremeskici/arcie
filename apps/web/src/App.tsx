@@ -1,7 +1,7 @@
 import { PrivyProvider } from "@privy-io/react-auth";
 import * as React from "react";
 import { api, type ServerConfig } from "@/lib/api";
-import { DemoAuth, PrivyAuth, useAuth } from "@/lib/auth";
+import { DemoAuth, DemoWalletAuth, PrivyAuth, readDemoWalletSession, saveDemoWalletSession, useAuth, type DemoWalletSession } from "@/lib/auth";
 import { DemoLogin, PrivyLogin } from "@/screens/Login";
 import { SignedIn } from "@/screens/SignedIn";
 import { Splash } from "@/components/Splash";
@@ -9,6 +9,18 @@ import { Splash } from "@/components/Splash";
 export function App() {
   const [config, setConfig] = React.useState<ServerConfig | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const [demoWalletSession, setDemoWalletSession] = React.useState(readDemoWalletSession);
+
+  async function enterDemoWallet() {
+    const session = await api.post<DemoWalletSession>("/auth/demo");
+    saveDemoWalletSession(session);
+    setDemoWalletSession(session);
+  }
+
+  const exitDemoWallet = React.useCallback(() => {
+    saveDemoWalletSession(null);
+    setDemoWalletSession(null);
+  }, []);
 
   React.useEffect(() => {
     api.get<ServerConfig>("/config").then(setConfig, () => setError("Can't reach the Arcie server."));
@@ -16,6 +28,14 @@ export function App() {
 
   if (error) return <Splash message={error} />;
   if (!config) return <Splash />;
+
+  if (config.demoWalletEnabled && demoWalletSession) {
+    return (
+      <DemoWalletAuth session={demoWalletSession} onExit={exitDemoWallet}>
+        <SignedIn config={config} />
+      </DemoWalletAuth>
+    );
+  }
 
   if (config.authMode === "privy" && config.privyAppId) {
     return (
@@ -28,7 +48,7 @@ export function App() {
         }}
       >
         <PrivyAuth>
-          <Gate config={config} login={<PrivyLogin />} />
+          <Gate config={config} login={<PrivyLogin onDemoLogin={config.demoWalletEnabled ? enterDemoWallet : undefined} />} />
         </PrivyAuth>
       </PrivyProvider>
     );

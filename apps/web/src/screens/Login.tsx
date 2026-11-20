@@ -1,5 +1,5 @@
 import { useLoginWithEmail, useLoginWithOAuth, usePrivy } from "@privy-io/react-auth";
-import { IconArrowLeft, IconBrandAppleFilled, IconMail } from "@tabler/icons-react";
+import { IconArrowLeft, IconBrandAppleFilled, IconMail, IconWallet } from "@tabler/icons-react";
 import * as React from "react";
 import { SiriOrb } from "@/components/ui/siri-orb";
 import { Button } from "@/components/Button";
@@ -33,7 +33,7 @@ function LoginShell({ children }: { children: React.ReactNode }) {
 }
 
 /** Social first, email as fallback, wallet behind "More options" (spec §17). */
-export function PrivyLogin() {
+export function PrivyLogin({ onDemoLogin }: { onDemoLogin?: (() => Promise<void>) | undefined }) {
   const { initOAuth, loading: oauthLoading } = useLoginWithOAuth();
   const { sendCode, loginWithCode, state } = useLoginWithEmail();
   const { login } = usePrivy();
@@ -41,6 +41,7 @@ export function PrivyLogin() {
   const [email, setEmail] = React.useState("");
   const [code, setCode] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
+  const [openingDemo, setOpeningDemo] = React.useState(false);
   const codeSent = state.status === "awaiting-code-input" || state.status === "submitting-code";
   const busy = state.status === "sending-code" || state.status === "submitting-code";
 
@@ -104,10 +105,19 @@ export function PrivyLogin() {
       <Button size="lg" variant="ghost" onClick={() => setEmailMode(true)}>
         <IconMail className="size-5" /> Continue with email
       </Button>
+      {onDemoLogin ? (
+        <Button size="lg" variant="outline" disabled={openingDemo} onClick={() => {
+          setOpeningDemo(true);
+          run(() => onDemoLogin().finally(() => setOpeningDemo(false)));
+        }}>
+          <IconWallet className="size-5" aria-hidden />
+          {openingDemo ? "Opening demo wallet…" : "Open demo wallet"}
+        </Button>
+      ) : null}
       <button className="mt-1 text-sm text-muted underline-offset-4 hover:underline" onClick={() => login()}>
         More options
       </button>
-      {error ? <p className="text-center text-sm text-danger">{error}</p> : null}
+      {error ? <p role="alert" className="text-center text-sm text-danger">{error}</p> : null}
     </LoginShell>
   );
 }

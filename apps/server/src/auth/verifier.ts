@@ -3,9 +3,10 @@ import { getAddress } from "viem";
 import { AuthError } from "./errors.js";
 
 export interface Identity {
-  /** Privy user id (DID); also the Arcie user id. */
+  /** Arcie user id. For Privy accounts this is the user's DID. */
   userId: string;
   displayName: string;
+  demoWallet?: { expiresAt: number };
   email?: string;
   /** External wallet the user logged in with (identity only). */
   linkedWallet?: `0x${string}`;

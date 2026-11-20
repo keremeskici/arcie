@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import OpenAI from "openai";
 import { createApp } from "./create-app.js";
 import { createAdminDrip } from "./auth/drip.js";
+import { createDemoWalletAuth } from "./auth/demo-wallet.js";
 import { createIdentify } from "./auth/identify.js";
 import { onboard } from "./auth/onboard.js";
 import { createPrivyVerifier } from "./auth/verifier.js";
@@ -51,6 +52,10 @@ export async function createRuntime(env: Env): Promise<{ app: Hono; close(): Pro
         ? createAdminDrip({ adminKey: env.ADMIN_PRIVATE_KEY as `0x${string}`, rpcUrl: env.ARC_RPC_URL, amountUsdc: env.WELCOME_DRIP_USDC })
         : undefined;
 
+    const demoWalletAuth = env.AUTH_MODE === "privy" && env.ONRAMP_ENVIRONMENT === "sandbox" &&
+      !env.DEMO_USER_ID.startsWith("did:") && env.DEMO_WALLET_SESSION_SECRET
+        ? createDemoWalletAuth(env.DEMO_WALLET_SESSION_SECRET, env.DEMO_USER_ID)
+        : undefined;
     const app = createApp({
       harness,
       db,
@@ -60,7 +65,8 @@ export async function createRuntime(env: Env): Promise<{ app: Hono; close(): Pro
       llmSecret: env.LLM_SHARED_SECRET,
       privyAppId: env.PRIVY_APP_ID,
       elevenLabsAgentId: env.ELEVENLABS_AGENT_ID,
-      identify: createIdentify({ mode: env.AUTH_MODE, verifier, demoUserId: env.DEMO_USER_ID }),
+      demoWalletAuth,
+      identify: createIdentify({ mode: env.AUTH_MODE, verifier, demoUserId: env.DEMO_USER_ID, demoWalletAuth }),
       onboard: (id) => {
         if (!env.CIRCLE_WALLET_SET_ID) throw new Error("CIRCLE_WALLET_SET_ID is missing; run `pnpm provision` first.");
         return onboard({ db, circle, walletSetId: env.CIRCLE_WALLET_SET_ID, drip: drip ? (address, submitted) => drip(address, undefined, submitted) : undefined }, id);

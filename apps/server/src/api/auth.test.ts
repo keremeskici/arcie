@@ -1,11 +1,58 @@
-import { seed, sessions } from "@arcie/db";
+import { seed, sessions, wallets } from "@arcie/db";
 import type { HarnessCtx } from "@arcie/harness";
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import type { AgentFn } from "../llm/route.js";
-import { latch, testApp } from "../testkit.js";
+import { createDemoWalletAuth } from "../auth/demo-wallet.js";
+import { DEMO_WALLET, latch, testApp } from "../testkit.js";
 
 const bearer = (userId: string) => ({ authorization: `Bearer tok-${userId}` });
+
+describe("hosted demo wallet", () => {
+  const demoWalletSecret = "a-test-secret-that-is-at-least-thirty-two-characters";
+
+  it("signs in to the existing testnet wallet and binds voice to the demo user", async () => {
+    const { call } = await testApp({
+      authMode: "privy",
+      demoWalletSecret,
+      onboard: async () => { throw new Error("Demo must reuse the existing wallet without onboarding."); },
+    });
+    expect((await (await call("GET", "/config")).json()).demoWalletEnabled).toBe(true);
+    const entry = await call("POST", "/auth/demo", { userId: "somebody-else" });
+    expect(entry.status).toBe(200);
+    expect(entry.headers.get("cache-control")).toBe("no-store");
+    const { token, expiresAt } = await entry.json();
+    expect(Date.parse(expiresAt)).toBeGreaterThan(Date.now());
+    const headers = { authorization: `Bearer ${token}`, "x-arcie-user": "somebody-else" };
+    const account = await (await call("POST", "/auth/session", {}, headers)).json();
+    expect(account.user.id).toBe("demo");
+    expect(account.wallet).toEqual({ address: DEMO_WALLET.address, chain: "Arc_Testnet" });
+    expect((await call("GET", "/balances", undefined, headers)).status).toBe(200);
+    expect((await call("POST", "/voice/session", {}, headers)).status).toBe(200);
+    expect((await call("GET", "/balances", undefined, { authorization: `Bearer ${token}x` })).status).toBe(401);
+  });
+
+  it("requires opt-in and refuses to provision a replacement wallet", async () => {
+    const disabled = await testApp({ authMode: "privy" });
+    expect((await (await disabled.call("GET", "/config")).json()).demoWalletEnabled).toBe(false);
+    expect((await disabled.call("POST", "/auth/demo")).status).toBe(404);
+
+    const enabled = await testApp({ authMode: "privy", demoWalletSecret });
+    await enabled.db.delete(wallets);
+    expect((await enabled.call("POST", "/auth/demo")).status).toBe(404);
+    expect(await enabled.db.select().from(wallets)).toEqual([]);
+  });
+
+  it("expires voice with the demo session and keeps direct chat private", async () => {
+    const { call } = await testApp({ authMode: "privy", demoWalletSecret });
+    const { token, expiresAt } = createDemoWalletAuth(demoWalletSecret, "demo").issue(Date.now() - 10_000);
+    const headers = { authorization: `Bearer ${token}` };
+    expect((await (await call("POST", "/voice/session", {}, headers)).json()).expiresAt).toBe(expiresAt);
+    expect((await call("POST", "/chat", { messages: [] }, headers)).status).toBe(401);
+    const expired = createDemoWalletAuth(demoWalletSecret, "demo").issue(0);
+    expect((await call("GET", "/balances", undefined, { authorization: `Bearer ${expired.token}` })).status).toBe(401);
+  });
+});
 
 describe("identify in privy mode", () => {
   it("rejects a request without a bearer token", async () => {

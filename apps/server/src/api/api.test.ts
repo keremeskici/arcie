@@ -109,6 +109,7 @@ describe("REST API", () => {
     expect(await r.json()).toEqual({
       authMode: "dev",
       demoUserId: "demo",
+      demoWalletEnabled: false,
       privyAppId: "privy-123",
       elevenLabsAgentId: "agent-456",
     });

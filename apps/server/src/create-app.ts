@@ -12,6 +12,7 @@ import { meRoutes } from "./api/me.js";
 import { onrampRoutes } from "./api/onramp.js";
 import { uiRoutes } from "./api/ui.js";
 import { eventRoutes } from "./events/sse.js";
+import type { createDemoWalletAuth } from "./auth/demo-wallet.js";
 import { resolveVoiceSession, type AuthMode } from "./auth/identify.js";
 import type { onboard } from "./auth/onboard.js";
 import type { Identity } from "./auth/verifier.js";
@@ -27,9 +28,10 @@ export interface AppDeps {
   agent: AgentFn;
   demoUserId: string;
   model: string;
-  /** Who is calling (spec §17): dev header/demo user, or a verified Privy bearer token. Throws AuthError → 401. */
+  /** Resolve the request identity or throw AuthError → 401. */
   identify: (c: Context) => Promise<Identity>;
   authMode: AuthMode;
+  demoWalletAuth?: ReturnType<typeof createDemoWalletAuth> | undefined;
   /** Optional shared secret ElevenLabs must send as `Authorization: Bearer …` on the custom-LLM endpoint. */
   llmSecret?: string | undefined;
   /** Public client config for the UI. */

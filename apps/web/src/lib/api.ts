@@ -39,6 +39,7 @@ export const api = {
 export type ServerConfig = {
   authMode: "dev" | "privy";
   demoUserId: string;
+  demoWalletEnabled: boolean;
   privyAppId: string | null;
   elevenLabsAgentId: string | null;
 };

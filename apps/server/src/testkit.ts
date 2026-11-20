@@ -4,6 +4,7 @@ import { seed, wallets } from "@arcie/db";
 import { createTestDb } from "@arcie/db/testing";
 import { createHarness, DbPolicyProvider, EventLog } from "@arcie/harness";
 import { createApp, type AppDeps } from "./create-app.js";
+import { createDemoWalletAuth } from "./auth/demo-wallet.js";
 import { AuthError } from "./auth/errors.js";
 import { createIdentify, type AuthMode } from "./auth/identify.js";
 import { onboard } from "./auth/onboard.js";
@@ -38,7 +39,7 @@ function fakeCircle(): WalletCreator {
   };
 }
 
-export async function testApp(over: Partial<AppDeps> & { authMode?: AuthMode } = {}) {
+export async function testApp({ demoWalletSecret, ...over }: Partial<AppDeps> & { authMode?: AuthMode; demoWalletSecret?: string } = {}) {
   // Pass `db` to build a second app instance on an existing test database (already seeded by the first).
   const created = over.db ? null : await createTestDb();
   const db = over.db ?? created!.db;
@@ -54,6 +55,7 @@ export async function testApp(over: Partial<AppDeps> & { authMode?: AuthMode } =
   const events = new EventLog(db);
   const harness = createHarness({ db, kit, policy: new DbPolicyProvider(db), events });
   const authMode = over.authMode ?? "dev";
+  const demoWalletAuth = demoWalletSecret ? createDemoWalletAuth(demoWalletSecret, "demo") : undefined;
   const circle = fakeCircle();
   const deps: AppDeps = {
     db,
@@ -64,7 +66,8 @@ export async function testApp(over: Partial<AppDeps> & { authMode?: AuthMode } =
     demoUserId: "demo",
     model: "test",
     authMode,
-    identify: createIdentify({ mode: authMode, verifier: fakeVerifier, demoUserId: "demo" }),
+    demoWalletAuth,
+    identify: createIdentify({ mode: authMode, verifier: fakeVerifier, demoUserId: "demo", demoWalletAuth }),
     onboard: (id) => onboard({ db, circle, walletSetId: "ws" }, id),
     ...over,
   };

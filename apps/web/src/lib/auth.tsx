@@ -1,9 +1,9 @@
 import { usePrivy } from "@privy-io/react-auth";
 import * as React from "react";
 
-/** One login surface for both server modes: Privy (real users) and dev (the server's demo user). */
+/** Shared interface for Privy, hosted demo, and local development sessions. */
 export type Auth = {
-  mode: "privy" | "dev";
+  mode: "privy" | "demo" | "dev";
   ready: boolean;
   authenticated: boolean;
   getToken: () => Promise<string | null>;
@@ -27,6 +27,49 @@ export function PrivyAuth({ children }: { children: React.ReactNode }) {
     () => ({ mode: "privy", ready, authenticated, getToken: getAccessToken, logout }),
     [ready, authenticated, getAccessToken, logout],
   );
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+}
+
+export type DemoWalletSession = { token: string; expiresAt: string };
+
+const DEMO_WALLET_SESSION_KEY = "arcie.demo-wallet-session";
+
+export function readDemoWalletSession(): DemoWalletSession | null {
+  try {
+    const session = JSON.parse(sessionStorage.getItem(DEMO_WALLET_SESSION_KEY) ?? "null") as DemoWalletSession | null;
+    return typeof session?.token === "string" && Date.parse(session.expiresAt) > Date.now() ? session : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveDemoWalletSession(session: DemoWalletSession | null) {
+  try {
+    if (session) sessionStorage.setItem(DEMO_WALLET_SESSION_KEY, JSON.stringify(session));
+    else sessionStorage.removeItem(DEMO_WALLET_SESSION_KEY);
+  } catch {
+    // The in-memory session still works when browser storage is unavailable.
+  }
+}
+
+export function DemoWalletAuth({ session, onExit, children }: {
+  session: DemoWalletSession;
+  onExit: () => void;
+  children: React.ReactNode;
+}) {
+  const { token, expiresAt } = session;
+  React.useEffect(() => {
+    const timeout = window.setTimeout(onExit, Math.max(0, Date.parse(expiresAt) - Date.now()));
+    return () => window.clearTimeout(timeout);
+  }, [expiresAt, onExit]);
+
+  const value = React.useMemo<Auth>(() => ({
+    mode: "demo",
+    ready: true,
+    authenticated: true,
+    getToken: async () => token,
+    logout: async () => onExit(),
+  }), [token, onExit]);
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

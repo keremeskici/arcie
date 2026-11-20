@@ -39,6 +39,7 @@ export function meRoutes(deps: AppDeps) {
     c.json({
       authMode: deps.authMode,
       demoUserId: deps.demoUserId,
+      demoWalletEnabled: Boolean(deps.demoWalletAuth),
       privyAppId: deps.privyAppId ?? null,
       elevenLabsAgentId: deps.elevenLabsAgentId ?? null,
     }),
@@ -104,7 +105,7 @@ export function meRoutes(deps: AppDeps) {
   });
 
   app.post("/chat", async (c) => {
-    const ctx = await screenCtx(deps, c);
+    const ctx = await screenCtx(deps, c, { allowDemo: false });
     const body = (await c.req.json().catch(() => ({}))) as { messages?: ChatCompletionMessageParam[] };
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const userTurn = messages.filter((m) => m.role === "user").length;

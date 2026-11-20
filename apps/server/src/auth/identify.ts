@@ -3,15 +3,21 @@ import { sessions, type DbOrTx } from "@arcie/db";
 import { and, eq, lt, sql } from "drizzle-orm";
 import type { Context } from "hono";
 import { randomBytes } from "node:crypto";
+import type { createDemoWalletAuth } from "./demo-wallet.js";
 import { AuthError } from "./errors.js";
 import type { Identity, TokenVerifier } from "./verifier.js";
 
-/** dev: x-arcie-user header or the demo user (tests, REPL, local demos). privy: Bearer Privy access token required. */
+/** Local development can select a user by header. Hosted requests require a bearer token. */
 export type AuthMode = "dev" | "privy";
 
 const VOICE_SESSION_TTL_MS = 2 * 3600_000;
 
-export function createIdentify(deps: { mode: AuthMode; verifier?: TokenVerifier | undefined; demoUserId: string }) {
+export function createIdentify(deps: {
+  mode: AuthMode;
+  verifier?: TokenVerifier | undefined;
+  demoUserId: string;
+  demoWalletAuth?: ReturnType<typeof createDemoWalletAuth> | undefined;
+}) {
   return async (c: Context): Promise<Identity> => {
     if (deps.mode === "dev") {
       const userId = c.req.header("x-arcie-user") ?? deps.demoUserId;
@@ -19,15 +25,20 @@ export function createIdentify(deps: { mode: AuthMode; verifier?: TokenVerifier 
     }
     const header = c.req.header("authorization") ?? "";
     const token = /^Bearer\s+(.+)$/i.exec(header)?.[1];
+    if (token?.startsWith("demo.")) {
+      const expiresAt = deps.demoWalletAuth?.verify(token);
+      if (!expiresAt) throw new AuthError("Your demo session expired. Open the demo wallet again.");
+      return { userId: deps.demoUserId, displayName: "Demo", demoWallet: { expiresAt } };
+    }
     if (!token || !deps.verifier) throw new AuthError("Please sign in.");
     return deps.verifier.verify(token);
   };
 }
 
 /** Unguessable id bound to one user, handed to ElevenLabs as the custom-LLM session_id (spec §17). */
-export async function mintVoiceSession(db: DbOrTx, userId: string, now = new Date()): Promise<{ sessionId: string; expiresAt: string }> {
+export async function mintVoiceSession(db: DbOrTx, userId: string, expiresBy = Infinity): Promise<{ sessionId: string; expiresAt: string }> {
   const sessionId = randomBytes(32).toString("base64url");
-  const expiresAt = new Date(now.getTime() + VOICE_SESSION_TTL_MS).toISOString();
+  const expiresAt = new Date(Math.min(Date.now() + VOICE_SESSION_TTL_MS, expiresBy)).toISOString();
   await db.insert(sessions).values({ id: sessionId, userId, channel: "voice", userTurn: 0, expiresAt });
   return { sessionId, expiresAt };
 }
