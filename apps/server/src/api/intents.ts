@@ -2,6 +2,7 @@ import { ArcieError, type ActionKind } from "@arcie/core";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AppDeps } from "../app.js";
+import { reconcileIntent } from "../reconcile.js";
 import { screenCtx } from "./http.js";
 
 const proposeBody = z.object({
@@ -25,8 +26,12 @@ export function intentRoutes(deps: AppDeps) {
 
   app.get("/intents/:id", async (c) => {
     const ctx = await screenCtx(deps, c);
-    const i = await deps.harness.intents.get(c.req.param("id"));
+    let i = await deps.harness.intents.get(c.req.param("id"));
     if (!i || i.userId !== ctx.userId) throw new ArcieError("NOT_FOUND");
+    // Only the owner reaches here. Settle an in-flight intent if it is due a check, then answer with current state.
+    if (i.status === "executing" && (await reconcileIntent(deps, i.id).catch((e) => { console.error(`Reconciling intent ${i!.id} failed:`, e); return false; }))) {
+      i = (await deps.harness.intents.get(i.id)) ?? i;
+    }
     return c.json({
       id: i.id,
       kind: i.kind,

@@ -140,6 +140,8 @@ export const intents = table(
     expiresAt: text("expires_at"),
     /** Bumped by every change to params, params_hash, preview or expires_at; a confirmation claim is only valid for the revision it saw. */
     revision: integer("revision").notNull().default(0),
+    /** Last on-demand reconciliation claim, set with database time; throttles settlement checks across instances. */
+    reconcileCheckedAt: timestamp("reconcile_checked_at", { withTimezone: true, mode: "string" }),
   },
   (t) => [
     // A session never has two Confirm cards open: the database refuses the second.

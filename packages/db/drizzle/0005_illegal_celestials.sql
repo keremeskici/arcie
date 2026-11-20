@@ -1,0 +1,1 @@
+ALTER TABLE "arcie"."intents" ADD COLUMN "reconcile_checked_at" timestamp with time zone;

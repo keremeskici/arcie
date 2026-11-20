@@ -11,7 +11,6 @@ import { onboard } from "./auth/onboard.js";
 import { createPrivyVerifier } from "./auth/verifier.js";
 import { loadEnv } from "./env.js";
 import { runAgentTurn, type ChatClient } from "./llm/loop.js";
-import { reconcileExecuting } from "./reconcile.js";
 
 const env = loadEnv();
 const { db } = createDb(env.DATABASE_URL);
@@ -59,9 +58,6 @@ const app = createApp({
   model: env.OPENAI_MODEL,
   agent: (ctx, messages, signal) => runAgentTurn(agentDeps, ctx, messages, signal),
 });
-
-const reconciled = await reconcileExecuting({ db, kit, events });
-if (reconciled) console.log(`Reconciled ${reconciled} in-flight intent(s) from before the restart.`);
 
 if (!(await getWallet(db, env.DEMO_USER_ID, HOME_CHAIN))) {
   console.warn(`No wallet for "${env.DEMO_USER_ID}" yet. Run \`pnpm provision\` first.`);

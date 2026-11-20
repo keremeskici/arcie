@@ -7,6 +7,7 @@ import { Hono } from "hono";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { z } from "zod";
 import type { AppDeps } from "../app.js";
+import { reconcileUser } from "../reconcile.js";
 import { screenCtx } from "./http.js";
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -119,6 +120,7 @@ export function meRoutes(deps: AppDeps) {
 
   app.get("/activity", async (c) => {
     const { userId } = await deps.identify(c);
+    await reconcileUser(deps, userId); // bounded and deduplicated; never blocks the read on a failing check
     const rows = await deps.db.select().from(audit).where(eq(audit.userId, userId)).orderBy(desc(audit.id)).limit(50);
     const items = rows
       .filter((r) => r.type.startsWith("intent.") || r.type.startsWith("onramp."))
