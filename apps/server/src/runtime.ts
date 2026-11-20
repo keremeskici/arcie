@@ -15,7 +15,8 @@ import type { Env } from "./env.js";
 import { runAgentTurn, type ChatClient } from "./llm/loop.js";
 
 // Use the Wallets SDK's CommonJS export on Node runtimes that disable ESM syntax detection.
-const { initiateDeveloperControlledWalletsClient } = createRequire(import.meta.url)("@circle-fin/developer-controlled-wallets") as
+const require = createRequire(import.meta.url);
+const { initiateDeveloperControlledWalletsClient } = require("@circle-fin/developer-controlled-wallets") as
   typeof import("@circle-fin/developer-controlled-wallets");
 
 /** Creates a request runtime and verifies database connectivity before returning it. */

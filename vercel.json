@@ -21,6 +21,13 @@
       }
     }
   },
+  "redirects": [
+    {
+      "source": "/",
+      "destination": "/index.html",
+      "permanent": false
+    }
+  ],
   "rewrites": [
     {
       "source": "/:route(config|me|balances|activity|intents|choices|receive|contacts|auth|voice|events|onramp|v1|health|vaults|quotes|chat)/:path*",

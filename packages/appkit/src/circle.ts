@@ -10,7 +10,8 @@ import type { AppKitPort, Fee, Position, SendParams, SwapParams, TxResult, Vault
 
 // The Wallets adapter's ESM entry loads an SDK file that requires Node's syntax detection.
 // Use its CommonJS export so the same adapter works in Vercel's Node runtime.
-const { createCircleWalletsAdapter } = createRequire(import.meta.url)("@circle-fin/adapter-circle-wallets") as
+const require = createRequire(import.meta.url);
+const { createCircleWalletsAdapter } = require("@circle-fin/adapter-circle-wallets") as
   typeof import("@circle-fin/adapter-circle-wallets");
 
 export interface CircleAppKitConfig {
