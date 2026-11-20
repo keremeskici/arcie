@@ -5,7 +5,7 @@ import { createTestDb } from "@arcie/db/testing";
 import { eq, sql } from "drizzle-orm";
 import { describe, expect, it, onTestFinished } from "vitest";
 import type { HarnessCtx } from "./context.js";
-import { EventBus } from "./events.js";
+import { EventLog } from "./events.js";
 import { audit } from "./audit.js";
 import { claimConfirmation } from "./coordination.js";
 import { createHarness } from "./harness.js";
@@ -26,7 +26,7 @@ async function setup(over: { dailyCapUsd?: number; maxPerTxUsd?: number } = {}) 
   const make = (db: Db) => {
     const kit = new FakeAppKit();
     kit.setBalance(W, "USDC", "100");
-    return { kit, h: createHarness({ db, kit, policy: new DbPolicyProvider(db), bus: new EventBus() }) };
+    return { kit, h: createHarness({ db, kit, policy: new DbPolicyProvider(db), events: new EventLog(db) }) };
   };
   const ctx = (sessionId: string, over: Partial<HarnessCtx> = {}): HarnessCtx => ({
     userId: "demo", sessionId, channel: "screen", userTurn: 1, now: () => T0, runId: `r${Math.random()}`, ...over,

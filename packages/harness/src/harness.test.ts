@@ -3,9 +3,9 @@ import type { ChoiceIsland, ConfirmIsland, IslandPayload, ReceiptIsland } from "
 import { intents, limits, seed, wallets } from "@arcie/db";
 import { createTestDb } from "@arcie/db/testing";
 import { DEFAULT_LIMITS } from "@arcie/core";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { HarnessCtx } from "./context.js";
-import { EventBus } from "./events.js";
+import { EventLog } from "./events.js";
 import { createHarness } from "./harness.js";
 import { DbPolicyProvider } from "./policy/db-provider.js";
 
@@ -20,10 +20,9 @@ async function setup(opts: { confirmChannels?: "any" | "screen" } = {}) {
   const kit = new FakeAppKit();
   kit.setBalance(W, "USDC", "100");
   kit.setBalance(W, "EURC", "20");
-  const bus = new EventBus();
-  const islands: IslandPayload[] = [];
-  bus.subscribe("s1", (i) => islands.push(i));
-  const h = createHarness({ db, kit, policy: new DbPolicyProvider(db), bus, ...opts });
+  const events = new EventLog(db);
+  const islands = async (): Promise<IslandPayload[]> => (await events.readAfter("s1", 0, 1000)).map((r) => r.island);
+  const h = createHarness({ db, kit, policy: new DbPolicyProvider(db), events, ...opts });
   let clock = new Date(T0);
   const ctx = (over: Partial<HarnessCtx> = {}): HarnessCtx => ({
     userId: "demo",
@@ -49,8 +48,8 @@ describe("propose → confirm → receipt", () => {
     expect(r.summary.endsWith(SUFFIX)).toBe(true);
     expect(r.island?.kind).toBe("confirm");
     expect(confirmIsland(r).title).toBe("Send 5 USD to Bob?");
-    expect(islands.some((i) => i.kind === "confirm")).toBe(true);
-    expect(islands.some((i) => i.kind === "steps")).toBe(true);
+    expect((await islands()).some((i) => i.kind === "confirm")).toBe(true);
+    await vi.waitFor(async () => expect((await islands()).some((i) => i.kind === "steps")).toBe(true));
   });
 
   it("refuses a voice confirm in the same turn, then executes on the next turn", async () => {
@@ -97,7 +96,7 @@ describe("propose → confirm → receipt", () => {
     await h.runTool(ctx(), "propose_send", { to: "Bob", amount: "5", token: "USDC" });
     await h.runTool(ctx({ userTurn: 2 }), "cancel_intent", {});
     expect((await allIntents())[0]!.status).toBe("cancelled");
-    expect(islands).toContainEqual(expect.objectContaining({ kind: "dismiss", reason: "cancelled" }));
+    expect(await islands()).toContainEqual(expect.objectContaining({ kind: "dismiss", reason: "cancelled" }));
   });
 
   it("supersedes the previous proposal so only one confirm card is open", async () => {
@@ -358,7 +357,7 @@ describe("overlapping quote confirmations (F5)", () => {
     expect(result.status).toBe("awaiting_confirmation");
     expect(second.status).not.toBe("succeeded");
     expect(kit.calls.filter((c) => c.method === "swap")).toHaveLength(0);
-    expect(islands.filter((i) => i.kind === "confirm")).toHaveLength(2);
+    expect((await islands()).filter((i) => i.kind === "confirm")).toHaveLength(2);
   });
 
   it("does not republish a quote cancelled during its refresh", async () => {
@@ -376,7 +375,7 @@ describe("overlapping quote confirmations (F5)", () => {
     release();
     await pending;
     expect((await h.intents.get(a.intentId))?.status).toBe("cancelled");
-    expect(islands.filter((i) => i.kind === "confirm")).toHaveLength(1);
+    expect((await islands()).filter((i) => i.kind === "confirm")).toHaveLength(1);
     expect(kit.calls).toHaveLength(0);
   });
 });
@@ -436,7 +435,7 @@ describe("interrupted preparations (F6)", () => {
     release();
     await pending;
     expect((await allIntents()).some((i) => i.params.amount === "5")).toBe(false);
-    expect(islands.filter((i) => i.kind === "confirm")).toHaveLength(event === "newer" ? 1 : 0);
+    expect((await islands()).filter((i) => i.kind === "confirm")).toHaveLength(event === "newer" ? 1 : 0);
     if (event === "newer") expect((await allIntents())[0]?.status).toBe("awaiting_confirmation");
   });
 });

@@ -4,7 +4,7 @@
  */
 import { FakeAppKit, type WalletRef } from "@arcie/appkit";
 import { createDb, seed, wallets } from "@arcie/db";
-import { createHarness, DbPolicyProvider, EventBus, type HarnessCtx, type ToolResult } from "@arcie/harness";
+import { createHarness, DbPolicyProvider, EventLog, type HarnessCtx, type ToolResult } from "@arcie/harness";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import OpenAI from "openai";
@@ -35,7 +35,7 @@ async function runCase(c: Case) {
   const kit = new FakeAppKit();
   kit.setBalance(W, "USDC", "100");
   kit.setBalance(W, "EURC", "20");
-  const h = createHarness({ db, kit, policy: new DbPolicyProvider(db), bus: new EventBus() });
+  const h = createHarness({ db, kit, policy: new DbPolicyProvider(db), events: new EventLog(db) });
   const calls: { name: string; args: Record<string, unknown>; result: ToolResult }[] = [];
   const recording = {
     tools: h.tools,

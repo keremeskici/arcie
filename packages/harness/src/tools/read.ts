@@ -37,7 +37,7 @@ export function readTools(svc: Svc) {
       run: async (ctx) => {
         const w = await walletFor(svc, ctx);
         const island = { kind: "receive" as const, address: w.address, chain: w.chain, tokens: getChain(w.chain).capabilities.send };
-        svc.bus.publish(ctx.sessionId, island);
+        await svc.events.publish(ctx.sessionId, island);
         return { summary: "I've put your receive details on screen.", data: { chain: w.chain, tokens: island.tokens }, island };
       },
     }),

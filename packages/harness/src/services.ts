@@ -4,7 +4,7 @@ import { contacts, type Db } from "@arcie/db";
 import { eq } from "drizzle-orm";
 import { formatUnits, getAddress, isAddress, parseUnits } from "viem";
 import type { HarnessCtx } from "./context.js";
-import type { EventBus } from "./events.js";
+import type { EventLog } from "./events.js";
 import type { IntentRepo } from "./intents/repo.js";
 import type { PolicyProvider } from "./policy/provider.js";
 
@@ -13,7 +13,7 @@ export interface Svc {
   db: Db;
   kit: AppKitPort;
   policy: PolicyProvider;
-  bus: EventBus;
+  events: EventLog;
   repo: IntentRepo;
   confirmChannels: "any" | "screen";
 }

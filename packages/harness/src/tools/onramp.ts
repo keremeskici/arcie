@@ -30,7 +30,7 @@ export function onrampTools(svc: Svc) {
           token: a.token,
           ...(a.amount ? { amount: a.amount } : {}),
         };
-        svc.bus.publish(ctx.sessionId, island);
+        await svc.events.publish(ctx.sessionId, island);
         return {
           summary: "I've opened the add-money screen. Complete your deposit there.",
           data: { expiresAt: s.expiresAt },
@@ -52,5 +52,5 @@ export async function recordOnrampEvent(
   // Browser reports are hints, not proof of a deposit. Always read balances from the chain.
   if (e.type !== "settled" && e.type !== "submitted") return;
   const w = await walletFor(svc, ctx);
-  svc.bus.publish(ctx.sessionId, { kind: "balances", chain: w.chain, balances: await svc.kit.getBalances(w) });
+  await svc.events.publish(ctx.sessionId, { kind: "balances", chain: w.chain, balances: await svc.kit.getBalances(w) });
 }

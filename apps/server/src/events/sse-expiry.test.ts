@@ -8,7 +8,7 @@ describe("event credential lifetime (F16)", () => {
     vi.setSystemTime(new Date("2026-11-07T10:00:00Z"));
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
-      const { app, db, bus } = await testApp({ authMode: "privy" });
+      const { app, db, events } = await testApp({ authMode: "privy" });
       await db.insert(sessions).values({ id: "expiring", userId: "demo", channel: "voice", expiresAt: new Date(Date.now() + 1000).toISOString() });
       const response = await app.request("/events?sessionId=expiring");
       expect(response.status).toBe(200);
@@ -16,7 +16,7 @@ describe("event credential lifetime (F16)", () => {
       const next = reader.read();
       if (trigger === "island") {
         vi.setSystemTime(new Date(Date.now() + 2000));
-        bus.publish("expiring", { kind: "receive", address: "private-address", chain: "Arc_Testnet", tokens: [] });
+        await events.append(db, "expiring", { kind: "receive", address: "private-address", chain: "Arc_Testnet", tokens: [] });
       } else {
         await vi.advanceTimersByTimeAsync(15_000);
       }

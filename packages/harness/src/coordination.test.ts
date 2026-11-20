@@ -4,7 +4,7 @@ import { createTestDb } from "@arcie/db/testing";
 import { eq, sql } from "drizzle-orm";
 import { describe, expect, it, onTestFinished } from "vitest";
 import type { HarnessCtx } from "./context.js";
-import { EventBus } from "./events.js";
+import { EventLog } from "./events.js";
 import { createHarness } from "./harness.js";
 import { claimConfirmation, releaseConfirmation } from "./coordination.js";
 import { IntentRepo } from "./intents/repo.js";
@@ -24,7 +24,7 @@ async function twoInstances() {
     const kit = new FakeAppKit();
     kit.setBalance(W, "USDC", "100");
     kit.setBalance(W, "EURC", "20");
-    return { kit, h: createHarness({ db, kit, policy: new DbPolicyProvider(db), bus: new EventBus() }) };
+    return { kit, h: createHarness({ db, kit, policy: new DbPolicyProvider(db), events: new EventLog(db) }) };
   };
   const ctx = (over: Partial<HarnessCtx> = {}): HarnessCtx => ({
     userId: "demo", sessionId: "s1", channel: "voice", userTurn: 1, now: () => T0, runId: `r${Math.random()}`, ...over,
@@ -289,7 +289,7 @@ describe("execution fence", () => {
     const started = new Promise<void>((r) => { entered = r; });
     const gate = new Promise<void>((r) => { release = r; });
     const policy = { getLimits: async (u: string) => { entered(); await gate; return real.getLimits(u); } };
-    const h = createHarness({ db: s.dbA, kit, policy, bus: new EventBus() });
+    const h = createHarness({ db: s.dbA, kit, policy, events: new EventLog(s.dbA) });
     const p = await s.a.h.propose(s.ctx(), "send", { to: "Bob", amount: "5", token: "USDC" });
     const id = (p.island as { intentId: string }).intentId;
     // Attach a handler now so an early rejection is not reported as unhandled.
@@ -366,7 +366,7 @@ describe("execution fence under a concurrent revision", () => {
     const started = new Promise<void>((r) => { entered = r; });
     const gate = new Promise<void>((r) => { release = r; });
     const policy = { getLimits: async (u: string) => { entered(); await gate; return real.getLimits(u); } };
-    const h = createHarness({ db: s.dbA, kit, policy, bus: new EventBus() });
+    const h = createHarness({ db: s.dbA, kit, policy, events: new EventLog(s.dbA) });
     const p = await s.a.h.propose(s.ctx(), "send", { to: "Bob", amount: "5", token: "USDC" });
     const id = (p.island as { intentId: string }).intentId;
     const outcome = h.confirm(s.ctx({ channel: "screen" }), id, "screen").then(() => null, (e: unknown) => e);

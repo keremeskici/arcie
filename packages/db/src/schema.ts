@@ -1,4 +1,4 @@
-import type { ActionKind, AgentLimits, ChainId, Channel } from "@arcie/core";
+import type { ActionKind, AgentLimits, ChainId, Channel, IslandPayload } from "@arcie/core";
 import { sql } from "drizzle-orm";
 import { bigint, check, integer, jsonb, pgSchema, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
@@ -98,6 +98,21 @@ export const sessionState = table("session_state", {
   preparingGeneration: integer("preparing_generation"),
   nextEventSeq: bigint("next_event_seq", { mode: "number" }).notNull().default(1),
 });
+
+/**
+ * Durable per-session island log behind `/events`. `seq` comes from `session_state.next_event_seq`, allocated
+ * in the writer's transaction (which holds that row lock until commit), so seqs commit in order per session.
+ */
+export const sessionEvents = table(
+  "session_events",
+  {
+    sessionId: text("session_id").notNull(),
+    seq: bigint("seq", { mode: "number" }).notNull(),
+    payload: jsonb("payload").$type<IslandPayload>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.sessionId, t.seq] })],
+);
 
 export const intents = table(
   "intents",

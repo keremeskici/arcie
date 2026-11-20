@@ -4,7 +4,7 @@ import { audit as auditTable, intents, seed, wallets } from "@arcie/db";
 import { createTestDb } from "@arcie/db/testing";
 import { describe, expect, it } from "vitest";
 import type { HarnessCtx } from "./context.js";
-import { EventBus } from "./events.js";
+import { EventLog } from "./events.js";
 import { createHarness } from "./harness.js";
 import { DbPolicyProvider } from "./policy/db-provider.js";
 
@@ -15,10 +15,9 @@ async function setup() {
   await seed(db, { userId: "demo" });
   await db.insert(wallets).values({ id: "w1", userId: "demo", chain: "Arc_Testnet", circleWalletId: "w1", address: ADDRESS, accountType: "EOA" });
   const kit = new FakeAppKit();
-  const bus = new EventBus();
-  const islands: IslandPayload[] = [];
-  bus.subscribe("s1", (i) => islands.push(i));
-  const h = createHarness({ db, kit, policy: new DbPolicyProvider(db), bus });
+  const events = new EventLog(db);
+  const islands = async (): Promise<IslandPayload[]> => (await events.readAfter("s1", 0, 1000)).map((r) => r.island);
+  const h = createHarness({ db, kit, policy: new DbPolicyProvider(db), events });
   const ctx: HarnessCtx = { userId: "demo", sessionId: "s1", channel: "voice", userTurn: 1, now: () => new Date(), runId: "r1" };
   return { db, kit, h, ctx, islands };
 }
@@ -27,7 +26,7 @@ describe("start_onramp", () => {
   it("opens checkout through the voice event stream without asking for an amount", async () => {
     const { h, ctx, db, islands } = await setup();
     const result = await h.runTool(ctx, "start_onramp", {});
-    expect(islands.find((i) => i.kind === "onramp")).toEqual(result.island);
+    expect((await islands()).find((i) => i.kind === "onramp")).toEqual(result.island);
     expect(result.island).toMatchObject({ environment: "sandbox", token: "USDC" });
     expect(result.island).not.toHaveProperty("amount");
     expect(await db.select().from(intents)).toHaveLength(0);
@@ -59,13 +58,13 @@ describe("recordOnrampEvent", () => {
     const { h, ctx, db, islands } = await setup();
     await h.recordOnrampEvent(ctx, { type: "submitted", payload: { settlementExpected: false } });
     expect((await db.select().from(auditTable)).map((a) => a.type)).not.toContain("onramp.settled");
-    expect(islands.some((i) => i.kind === "balances")).toBe(true);
+    expect((await islands()).some((i) => i.kind === "balances")).toBe(true);
   });
   it("audits the event and publishes fresh balances when settled", async () => {
     const { h, ctx, db, islands } = await setup();
     await h.recordOnrampEvent(ctx, { type: "settled", payload: { amount: "50" } });
     expect((await db.select().from(auditTable)).map((a) => a.type)).toContain("onramp.settled");
-    expect(islands.some((i) => i.kind === "balances")).toBe(true);
+    expect((await islands()).some((i) => i.kind === "balances")).toBe(true);
   });
 });
 

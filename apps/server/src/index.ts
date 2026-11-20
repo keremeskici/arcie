@@ -1,6 +1,6 @@
 import { createCircleAppKit, getWallet, HOME_CHAIN } from "@arcie/appkit";
 import { createDb, seed } from "@arcie/db";
-import { createHarness, DbPolicyProvider, EventBus } from "@arcie/harness";
+import { createHarness, DbPolicyProvider, EventLog } from "@arcie/harness";
 import { initiateDeveloperControlledWalletsClient } from "@circle-fin/developer-controlled-wallets";
 import { serve } from "@hono/node-server";
 import OpenAI from "openai";
@@ -26,8 +26,8 @@ const kit = createCircleAppKit({
   ...(env.ONRAMP_REFERRER_DOMAIN ? { referrerDomain: env.ONRAMP_REFERRER_DOMAIN } : {}),
   ...(env.ARC_RPC_URL ? { rpcUrls: { Arc_Testnet: env.ARC_RPC_URL } } : {}),
 });
-const bus = new EventBus();
-const harness = createHarness({ db, kit, policy: new DbPolicyProvider(db), bus, confirmChannels: env.CONFIRM_CHANNELS });
+const events = new EventLog(db);
+const harness = createHarness({ db, kit, policy: new DbPolicyProvider(db), events, confirmChannels: env.CONFIRM_CHANNELS });
 const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY }) as unknown as ChatClient;
 const agentDeps = { openai, model: env.OPENAI_MODEL, reasoningEffort: env.OPENAI_REASONING_EFFORT, harness };
 
@@ -45,7 +45,7 @@ const app = createApp({
   harness,
   db,
   kit,
-  bus,
+  events,
   authMode: env.AUTH_MODE,
   llmSecret: env.LLM_SHARED_SECRET,
   privyAppId: env.PRIVY_APP_ID,
@@ -60,7 +60,7 @@ const app = createApp({
   agent: (ctx, messages, signal) => runAgentTurn(agentDeps, ctx, messages, signal),
 });
 
-const reconciled = await reconcileExecuting({ db, kit, bus });
+const reconciled = await reconcileExecuting({ db, kit, events });
 if (reconciled) console.log(`Reconciled ${reconciled} in-flight intent(s) from before the restart.`);
 
 if (!(await getWallet(db, env.DEMO_USER_ID, HOME_CHAIN))) {

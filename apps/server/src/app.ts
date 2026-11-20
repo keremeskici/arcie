@@ -1,6 +1,6 @@
 import type { AppKitPort } from "@arcie/appkit";
 import type { Db } from "@arcie/db";
-import type { EventBus, Harness } from "@arcie/harness";
+import type { EventLog, Harness } from "@arcie/harness";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { authRoutes } from "./api/auth.js";
@@ -20,7 +20,9 @@ export interface AppDeps {
   harness: Harness;
   db: Db;
   kit: AppKitPort;
-  bus: EventBus;
+  events: EventLog;
+  /** Stream tuning; tests shorten these. Defaults: 240 s per stream, 1 s poll, 15 s ping. */
+  sse?: { maxMs?: number; pollMs?: number; pingMs?: number };
   agent: AgentFn;
   demoUserId: string;
   model: string;

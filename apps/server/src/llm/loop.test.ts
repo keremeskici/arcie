@@ -140,9 +140,9 @@ describe("real harness tool surface", () => {
   it("exposes only the spec §8.1 tools and nothing that executes directly", async () => {
     const { FakeAppKit } = await import("@arcie/appkit");
     const { createTestDb } = await import("@arcie/db/testing");
-    const { createHarness, DbPolicyProvider, EventBus } = await import("@arcie/harness");
+    const { createHarness, DbPolicyProvider, EventLog } = await import("@arcie/harness");
     const { db } = await createTestDb();
-    const h = createHarness({ db, kit: new FakeAppKit(), policy: new DbPolicyProvider(db), bus: new EventBus() });
+    const h = createHarness({ db, kit: new FakeAppKit(), policy: new DbPolicyProvider(db), events: new EventLog(db) });
     const SPEC = [
       "get_balances", "get_receive_info", "find_contact", "list_contacts", "get_swap_quote", "list_earn_vaults",
       "get_earn_positions", "get_activity", "get_intent", "propose_send", "propose_swap", "propose_earn_deposit",

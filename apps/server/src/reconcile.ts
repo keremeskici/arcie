@@ -1,14 +1,14 @@
 import { getChain, getWallet, type AppKitPort } from "@arcie/appkit";
 import { ArcieError, tokenName } from "@arcie/core";
 import { audit, intents, type Db } from "@arcie/db";
-import { buildReceipt, IntentRepo, type EventBus, type Intent } from "@arcie/harness";
+import { buildReceipt, IntentRepo, type EventLog, type Intent } from "@arcie/harness";
 import { eq } from "drizzle-orm";
 
 const ORPHAN_AFTER_MS = 5 * 60_000;
 const CHECK_TIMEOUT_MS = 10_000;
 
 /** Startup recovery; terminal results remain available after the in-memory event is gone. */
-export async function reconcileExecuting(deps: { db: Db; kit: AppKitPort; bus: EventBus; now?: () => Date }): Promise<number> {
+export async function reconcileExecuting(deps: { db: Db; kit: AppKitPort; events: EventLog; now?: () => Date }): Promise<number> {
   const now = (deps.now ?? (() => new Date()))();
   const stuck = await deps.db.select().from(intents).where(eq(intents.status, "executing"));
   let reconciled = 0;
@@ -22,23 +22,28 @@ export async function reconcileExecuting(deps: { db: Db; kit: AppKitPort; bus: E
       ...(i.txHash ? { txHash: i.txHash, explorerUrl: getChain(i.chain).explorerTx(i.txHash) } : {}),
       ...(error ? { error } : {}),
     });
-    const changed = await deps.db.transaction(async (tx) => {
-      const won = await new IntentRepo(tx).transition(i.id, "executing", status, {
-        actuals: actual, preview: { ...i.preview, receipt },
-        // Missing hashes cannot establish whether funds moved; keep their reservation.
-        statusReason: !i.txHash ? "submission_unknown" : null,
-        error: error ? { code: error.code, message: error.spoken } : null,
+    // The receipt event commits with the transition. It is appended first so the session_state lock comes before
+    // the intent row lock (the order proposals and cancels use); losing the compare-and-set rolls it back.
+    const lost = new Error("transition lost");
+    try {
+      await deps.db.transaction(async (tx) => {
+        await deps.events.append(tx, i.sessionId, receipt);
+        const won = await new IntentRepo(tx).transition(i.id, "executing", status, {
+          actuals: actual, preview: { ...i.preview, receipt },
+          // Missing hashes cannot establish whether funds moved; keep their reservation.
+          statusReason: !i.txHash ? "submission_unknown" : null,
+          error: error ? { code: error.code, message: error.spoken } : null,
+        });
+        if (!won) throw lost;
+        await tx.insert(audit).values({
+          userId: i.userId, sessionId: i.sessionId, intentId: i.id,
+          type: `intent.${status}`, payload: { recovered: true, txHash: i.txHash, summary: error?.spoken ?? "Transaction completed." },
+          createdAt: now.toISOString(),
+        });
       });
-      if (won) await tx.insert(audit).values({
-        userId: i.userId, sessionId: i.sessionId, intentId: i.id,
-        type: `intent.${status}`, payload: { recovered: true, txHash: i.txHash, summary: error?.spoken ?? "Transaction completed." },
-        createdAt: now.toISOString(),
-      });
-      return won;
-    });
-    if (changed) {
-      deps.bus.publish(i.sessionId, receipt);
       reconciled++;
+    } catch (e) {
+      if (e !== lost) throw e;
     }
   }
 

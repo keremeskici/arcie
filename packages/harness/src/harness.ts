@@ -1,6 +1,6 @@
 import type { AppKitPort } from "@arcie/appkit";
 import { ArcieError, type ActionKind, type Channel, type IslandPayload, type TokenSymbol, tokenName } from "@arcie/core";
-import { choices, type Db } from "@arcie/db";
+import { choices, type Db, type DbOrTx } from "@arcie/db";
 import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { parseUnits } from "viem";
@@ -9,7 +9,7 @@ import { audit } from "./audit.js";
 import type { HarnessCtx } from "./context.js";
 import { beginProposal, cancelUnderLock, claimConfirmation, claimExecution, finishProposal, publishProposal, releaseConfirmation } from "./coordination.js";
 import { buildReceipt, nextStepFor } from "./disclosure/receipt.js";
-import { EventBus, StepTracker } from "./events.js";
+import { StepTracker, type EventLog } from "./events.js";
 import { paramsHash } from "./intents/hash.js";
 import { assertConfirmable } from "./intents/machine.js";
 import { IntentRepo, type Intent, type IntentStatus } from "./intents/repo.js";
@@ -41,9 +41,9 @@ export interface Harness {
   recordOnrampEvent(ctx: HarnessCtx, e: { type: "submitted" | "settled" | "failed"; payload: unknown }): Promise<void>;
 }
 
-export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyProvider; bus: EventBus; confirmChannels?: "any" | "screen" }): Harness {
+export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyProvider; events: EventLog; confirmChannels?: "any" | "screen" }): Harness {
   const svc: Svc = { ...deps, repo: new IntentRepo(deps.db), confirmChannels: deps.confirmChannels ?? "any" };
-  const { repo, bus, db } = svc;
+  const { repo, events, db } = svc;
   const trackers = new Map<string, StepTracker>();
 
   const assertActive = (ctx: HarnessCtx) => {
@@ -53,15 +53,34 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
   const tracker = (ctx: HarnessCtx) => {
     let t = trackers.get(ctx.runId);
     if (!t) {
-      t = new StepTracker(bus, ctx);
+      t = new StepTracker(events, ctx);
       trackers.set(ctx.runId, t);
       if (trackers.size > 500) trackers.delete(trackers.keys().next().value!);
     }
     return t;
   };
 
-  const dismiss = (ctx: HarnessCtx, intentId: string, reason: "cancelled" | "superseded" | "expired") =>
-    bus.publish(ctx.sessionId, { kind: "dismiss", intentId, reason });
+  /**
+   * Moves an intent between statuses and appends its island in ONE transaction. The event is appended first so
+   * the session_state row lock is taken before the intent row lock (the order publishProposal and cancel use);
+   * a lost compare-and-set rolls the event back with it. Returns whether this call made the transition.
+   */
+  async function transitionWithEvent(sessionId: string, intentId: string, from: IntentStatus, to: IntentStatus, patch: Parameters<IntentRepo["transition"]>[3], island: IslandPayload): Promise<boolean> {
+    const lost = new Error("transition lost");
+    try {
+      await db.transaction(async (tx) => {
+        await events.append(tx, sessionId, island);
+        if (!(await new IntentRepo(tx).transition(intentId, from, to, patch))) throw lost;
+      });
+      return true;
+    } catch (e) {
+      if (e === lost) return false;
+      throw e;
+    }
+  }
+
+  const dismiss = (tx: DbOrTx, ctx: HarnessCtx, intentId: string, reason: "cancelled" | "superseded" | "expired") =>
+    events.append(tx, ctx.sessionId, { kind: "dismiss", intentId, reason });
 
   async function propose(ctx: HarnessCtx, kind: ActionKind, params: unknown): Promise<ToolResult> {
     assertActive(ctx);
@@ -78,13 +97,13 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
 
       if (prep.type === "choice") {
         const id = randomUUID();
+        const island: IslandPayload = { kind: "choice", choiceId: id, question: prep.question, options: prep.options };
         const written = await publishProposal(db, ctx.sessionId, generation, async (tx) => {
           await tx.insert(choices).values({ id, sessionId: ctx.sessionId, question: prep.question, options: prep.options, createdAt: now.toISOString() });
+          await events.append(tx, ctx.sessionId, island);
           return true;
         });
         if (!written) return replaced;
-        const island: IslandPayload = { kind: "choice", choiceId: id, question: prep.question, options: prep.options };
-        bus.publish(ctx.sessionId, island);
         const names = prep.options.map((o) => o.label);
         return { summary: `I found ${countWord(names.length)} contacts: ${joinNames(names)}. Which one?`, data: { choiceId: id, options: prep.options }, island };
       }
@@ -109,12 +128,13 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
         const island = prep.buildIsland(created.id, created.expiresAt!);
         await txRepo.patch(created.id, { preview: { ...prep.preview, island, estimated: prep.estimated } });
         await audit(tx, ctx, "intent.proposed", { kind, params: prep.params, usdValue: prep.usdValue }, created.id);
+        // The card and any dismissals commit with the proposal, in the order a stream should show them.
+        for (const old of superseded) await dismiss(tx, ctx, old, "superseded");
+        await events.append(tx, ctx.sessionId, island);
         return { intent: created, island, superseded };
       });
       if (!published) return replaced;
-      const { intent, island, superseded } = published;
-      for (const old of superseded) dismiss(ctx, old, "superseded");
-      bus.publish(ctx.sessionId, island);
+      const { intent, island } = published;
       const summary = prep.requireScreen ? `${island.spokenPrompt} Because this is a new recipient, please tap confirm on the card.` : island.spokenPrompt;
       return { summary, data: { intentId: intent.id }, island };
     } finally {
@@ -153,7 +173,7 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
     });
     // Cancelled, superseded, expired or revised while the provider answered: this consent is stale.
     if (!written) throw new ArcieError("POLICY_DENIED", { spoken: STALE_CONSENT });
-    bus.publish(ctx.sessionId, island);
+    await events.publish(ctx.sessionId, island);
     await audit(db, ctx, "intent.requoted", { estimatedOut: est.estimatedOut }, intent.id);
     return { status: "awaiting_confirmation", summary: island.spokenPrompt, island };
   }
@@ -181,7 +201,7 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
       assertConfirmable(intent, { channel, userTurn: ctx.userTurn, now: started });
     } catch (e) {
       if (e instanceof ArcieError && e.code === "QUOTE_EXPIRED" && intent?.status === "awaiting_confirmation") {
-        if (await repo.transition(intent.id, "awaiting_confirmation", "expired")) dismiss(ctx, intent.id, "expired");
+        await transitionWithEvent(ctx.sessionId, intent.id, "awaiting_confirmation", "expired", {}, { kind: "dismiss", intentId: intent.id, reason: "expired" });
       }
       throw e;
     }
@@ -253,11 +273,9 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
         elapsedMs: elapsed(),
         ...(nextStep ? { nextStep } : {}),
       });
-      await repo.transition(intent.id, "executing", done ? "succeeded" : "executing", {
-        txHash: ex.tx.txHash, actuals: ex.actual,
-        ...(done ? { preview: { ...intent.preview, receipt } } : {}),
-      });
-      if (done) bus.publish(ctx.sessionId, receipt);
+      const settledPatch = { txHash: ex.tx.txHash, actuals: ex.actual, ...(done ? { preview: { ...intent.preview, receipt } } : {}) };
+      if (done) await transitionWithEvent(ctx.sessionId, intent.id, "executing", "succeeded", settledPatch, receipt);
+      else await repo.transition(intent.id, "executing", "executing", settledPatch);
       await audit(db, ctx, done ? "intent.succeeded" : "intent.pending", { txHash: ex.tx.txHash, actual: ex.actual }, intent.id);
       return done
         ? { status: "succeeded", summary: ex.summary, island: receipt }
@@ -271,8 +289,7 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
         return { status: "executing", summary };
       }
       const receipt = buildReceipt({ intentId: intent.id, status: "failed", estimated, actual: {}, elapsedMs: elapsed(), error: err });
-      await repo.transition(intent.id, "executing", "failed", { error: { code: err.code, message: err.spoken }, preview: { ...intent.preview, receipt } });
-      bus.publish(ctx.sessionId, receipt);
+      await transitionWithEvent(ctx.sessionId, intent.id, "executing", "failed", { error: { code: err.code, message: err.spoken }, preview: { ...intent.preview, receipt } }, receipt);
       await audit(db, ctx, "intent.failed", { code: err.code, detail: String((err.detail as Error)?.message ?? "") }, intent.id);
       return { status: "failed", summary: err.spoken, island: receipt };
     }
@@ -290,6 +307,7 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
       if (intent && intent.userId === ctx.userId && intent.status === "awaiting_confirmation"
         && await txRepo.transition(intent.id, "awaiting_confirmation", "cancelled", { statusReason: "user" })) {
         await audit(tx, ctx, "intent.cancelled", {}, intent.id);
+        await dismiss(tx, ctx, intent.id, "cancelled");
         return { stopped: preparing, cancelledId: intent.id };
       }
       return { stopped: preparing, cancelledId: null };
@@ -297,7 +315,6 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
     if (!cancelledId) {
       return { summary: stopped ? "Okay, I stopped preparing that. Nothing was moved." : "There's nothing to cancel.", data: { cancelled: stopped } };
     }
-    dismiss(ctx, cancelledId, "cancelled");
     return { summary: "Okay, I cancelled that. Nothing was moved.", data: { cancelled: true, intentId: cancelledId } };
   }
 

@@ -2,7 +2,7 @@
 import { FakeAppKit, type WalletCreator, type WalletRef } from "@arcie/appkit";
 import { seed, wallets } from "@arcie/db";
 import { createTestDb } from "@arcie/db/testing";
-import { createHarness, DbPolicyProvider, EventBus } from "@arcie/harness";
+import { createHarness, DbPolicyProvider, EventLog } from "@arcie/harness";
 import { createApp, type AppDeps } from "./app.js";
 import { AuthError } from "./auth/errors.js";
 import { createIdentify, type AuthMode } from "./auth/identify.js";
@@ -39,20 +39,26 @@ function fakeCircle(): WalletCreator {
 }
 
 export async function testApp(over: Partial<AppDeps> & { authMode?: AuthMode } = {}) {
-  const { db, close } = await createTestDb();
-  await seed(db, { userId: "demo" });
-  await db.insert(wallets).values({ id: "w1", userId: "demo", chain: "Arc_Testnet", circleWalletId: "w1", address: DEMO_WALLET.address, accountType: "EOA" });
+  // Pass `db` to build a second app instance on an existing test database (already seeded by the first).
+  const created = over.db ? null : await createTestDb();
+  const db = over.db ?? created!.db;
+  const url = created?.url ?? "";
+  const close = created?.close ?? (async () => {});
+  if (created) {
+    await seed(db, { userId: "demo" });
+    await db.insert(wallets).values({ id: "w1", userId: "demo", chain: "Arc_Testnet", circleWalletId: "w1", address: DEMO_WALLET.address, accountType: "EOA" });
+  }
   const kit = new FakeAppKit();
   kit.setBalance(DEMO_WALLET, "USDC", "100");
   kit.setBalance(DEMO_WALLET, "EURC", "20");
-  const bus = new EventBus();
-  const harness = createHarness({ db, kit, policy: new DbPolicyProvider(db), bus });
+  const events = new EventLog(db);
+  const harness = createHarness({ db, kit, policy: new DbPolicyProvider(db), events });
   const authMode = over.authMode ?? "dev";
   const circle = fakeCircle();
   const deps: AppDeps = {
     db,
     kit,
-    bus,
+    events,
     harness,
     agent: silentAgent,
     demoUserId: "demo",
@@ -71,5 +77,5 @@ export async function testApp(over: Partial<AppDeps> & { authMode?: AuthMode } =
       headers: { "content-type": "application/json", ...headers },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })) as TestResponse;
-  return { app, db, kit, bus, harness, call, close };
+  return { app, db, url, kit, events, harness, call, close };
 }
