@@ -155,3 +155,21 @@ it("starts the local listener and releases its Postgres connection on SIGTERM", 
   `);
   expect(after?.clients).toBe(0);
 }, 10_000);
+
+
+it("initializes the Vercel entry with Node's ESM syntax detection disabled", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const { url } = await createTestDb();
+  const script = `
+    const { default: app } = await import('./src/index.ts');
+    const health = await app.request('/health');
+    const protectedRoute = await app.request('/me');
+    process.stdout.write(JSON.stringify([health.status, await health.json(), protectedRoute.status]));
+    process.exit(0);
+  `;
+  const { stdout } = await promisify(execFile)(process.execPath, [
+    "--no-experimental-detect-module", "--import", "tsx", "--input-type=module", "--eval", script,
+  ], { cwd: new URL("../", import.meta.url), env: { ...process.env, ...hostedEnv, DATABASE_URL: url }, timeout: 10_000 });
+  expect(JSON.parse(stdout)).toEqual([200, { ok: true }, 401]);
+});

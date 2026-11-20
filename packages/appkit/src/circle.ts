@@ -1,12 +1,17 @@
 import { ArcieError, type ChainId, type TokenSymbol } from "@arcie/core";
-import { createCircleWalletsAdapter } from "@circle-fin/adapter-circle-wallets";
 import { AppKit } from "@circle-fin/app-kit";
 import { createAppServerKit } from "@circle-fin/app-kit/server";
+import { createRequire } from "node:module";
 import { createPublicClient, erc20Abi, formatUnits, http, type PublicClient } from "viem";
 import { getChain } from "./chains.js";
 import { mapKitError } from "./errors.js";
 import { nativeFeeToGasToken, pickUsdRates, swapFeeLabel } from "./normalize.js";
 import type { AppKitPort, Fee, Position, SendParams, SwapParams, TxResult, Vault, VaultAmount, WalletRef } from "./port.js";
+
+// The Wallets adapter's ESM entry loads an SDK file that requires Node's syntax detection.
+// Use its CommonJS export so the same adapter works in Vercel's Node runtime.
+const { createCircleWalletsAdapter } = createRequire(import.meta.url)("@circle-fin/adapter-circle-wallets") as
+  typeof import("@circle-fin/adapter-circle-wallets");
 
 export interface CircleAppKitConfig {
   circleApiKey: string;

@@ -1,7 +1,9 @@
 import { sql } from "drizzle-orm";
+import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { expect, it, onTestFinished, vi } from "vitest";
 import { createDb } from "./client.js";
+import { migrateDb } from "./migrate.js";
 import { createTestDb } from "./testing.js";
 
 vi.mock("postgres", { spy: true });
@@ -70,4 +72,72 @@ it("enables RLS on every application table with a single runtime-only policy", a
   expect(policies).toEqual(tables.map(({ name }) => ({
     name, roles: "{arcie_runtime}", cmd: "ALL", qual: "true", with_check: "true",
   })));
+});
+
+
+it.each([
+  "postgres://127.0.0.1/app?host=remote.example.invalid",
+  "postgres://remote.example.invalid:6543/app?port=5432",
+  "postgres://127.0.0.1/app?sslrootcert=/synthetic-fixture/missing.crt",
+  "postgres://127.0.0.1/app?sslcert=/synthetic-fixture/missing.crt",
+  "postgres://127.0.0.1/app?sslkey=/synthetic-fixture/missing.key",
+  "postgres://first.example.invalid,second.example.invalid/app",
+  "postgres://%2Fsynthetic-fixture/app",
+])("rejects ambiguous host, port or certificate file options before opening either client", async (url) => {
+  vi.mocked(postgres).mockClear();
+  let client: ReturnType<typeof createDb> | undefined;
+  try {
+    expect(() => { client = createDb(url); }).toThrow(/Postgres connection URL/);
+    await expect(migrateDb(url)).rejects.toThrow(/Postgres connection URL/);
+    expect(postgres).not.toHaveBeenCalled();
+  } finally {
+    await client?.close();
+  }
+});
+
+it("pins an omitted port to 5432 instead of inheriting PGPORT", async () => {
+  const url = "postgres://localhost/app";
+  vi.stubEnv("PGPORT", "1");
+  try {
+    const runtime = createDb(url);
+    onTestFinished(runtime.close);
+    expect(postgres).toHaveBeenLastCalledWith(url, expect.objectContaining({ host: ["localhost"], port: 5432 }));
+
+    const controller = new Error("config captured without a connection");
+    vi.mocked(postgres).mockImplementationOnce(() => { throw controller; });
+    await expect(migrateDb(url)).rejects.toBe(controller);
+    expect(postgres).toHaveBeenLastCalledWith(url, expect.objectContaining({ host: ["localhost"], port: 5432 }));
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
+
+it("refuses migration connections through the transaction pooler before creating a client", async () => {
+  vi.mocked(postgres).mockClear();
+  await expect(migrateDb("postgres://localhost:6543/app")).rejects.toThrow(/direct or session-mode/);
+  expect(postgres).not.toHaveBeenCalled();
+});
+
+it.each(["LOGIN", "BYPASSRLS", "SUPERUSER", "CREATEDB", "CREATEROLE", "REPLICATION"])(
+  "rejects an existing arcie_runtime role with %s",
+  async (attribute) => {
+    const { db } = await createTestDb();
+    const migration = await readFile(new URL("../drizzle/0006_roles_rls.sql", import.meta.url), "utf8");
+    await expect(db.transaction(async (tx) => {
+      // The transaction rolls back the cluster-wide change even if the migration accepts it.
+      await tx.execute(sql.raw(`ALTER ROLE arcie_runtime ${attribute}`));
+      await tx.execute(sql.raw(migration.split("--> statement-breakpoint")[0]!));
+    })).rejects.toMatchObject({ cause: { message: expect.stringContaining("arcie_runtime has incompatible role attributes") } });
+  },
+);
+
+it("accepts an existing compatible arcie_runtime role without changing its identity", async () => {
+  const { db } = await createTestDb();
+  const migration = await readFile(new URL("../drizzle/0006_roles_rls.sql", import.meta.url), "utf8");
+  const roleId = sql`select oid from pg_roles where rolname = 'arcie_runtime'`;
+  await db.transaction(async (tx) => {
+    const before = await tx.execute(roleId);
+    await tx.execute(sql.raw(migration.split("--> statement-breakpoint")[0]!));
+    expect(await tx.execute(roleId)).toEqual(before);
+  });
 });

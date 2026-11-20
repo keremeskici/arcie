@@ -1,9 +1,9 @@
 import { createCircleAppKit } from "@arcie/appkit";
 import { createDb } from "@arcie/db";
 import { createHarness, DbPolicyProvider, EventLog } from "@arcie/harness";
-import { initiateDeveloperControlledWalletsClient } from "@circle-fin/developer-controlled-wallets";
 import { sql } from "drizzle-orm";
 import type { Hono } from "hono";
+import { createRequire } from "node:module";
 import OpenAI from "openai";
 import { createApp } from "./create-app.js";
 import { createAdminDrip } from "./auth/drip.js";
@@ -12,6 +12,10 @@ import { onboard } from "./auth/onboard.js";
 import { createPrivyVerifier } from "./auth/verifier.js";
 import type { Env } from "./env.js";
 import { runAgentTurn, type ChatClient } from "./llm/loop.js";
+
+// Use the Wallets SDK's CommonJS export on Node runtimes that disable ESM syntax detection.
+const { initiateDeveloperControlledWalletsClient } = createRequire(import.meta.url)("@circle-fin/developer-controlled-wallets") as
+  typeof import("@circle-fin/developer-controlled-wallets");
 
 /** Creates a request runtime and verifies database connectivity before returning it. */
 export async function createRuntime(env: Env): Promise<{ app: Hono; close(): Promise<void> }> {

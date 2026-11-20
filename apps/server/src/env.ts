@@ -1,4 +1,4 @@
-import { isLoopbackDatabase } from "@arcie/db";
+import { databaseEndpoint } from "@arcie/db";
 import { z } from "zod";
 
 const optional = z.preprocess((v) => (v === "" ? undefined : v), z.string().optional());
@@ -14,7 +14,14 @@ const schema = z.object({
   APPKIT_API_KEY: optional,
   ARC_RPC_URL: optional,
   ONRAMP_REFERRER_DOMAIN: optional,
-  DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/, hostname: /.+/ }),
+  DATABASE_URL: z.string().refine((value) => {
+    try {
+      databaseEndpoint(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }),
   DATABASE_POOL_MAX: z.coerce.number().int().positive().default(3),
   DATABASE_SSL: z.preprocess((v) => v === "" ? undefined : v, z.enum(["require", "disable"]).optional()),
   DATABASE_SSL_CA: optional,
@@ -41,7 +48,7 @@ const schema = z.object({
   }
 }).transform((e) => ({
   ...e,
-  DATABASE_SSL: e.DATABASE_SSL ?? (isLoopbackDatabase(e.DATABASE_URL) ? "disable" as const : "require" as const),
+  DATABASE_SSL: e.DATABASE_SSL ?? (databaseEndpoint(e.DATABASE_URL).loopback ? "disable" as const : "require" as const),
 }));
 
 export type Env = z.infer<typeof schema>;

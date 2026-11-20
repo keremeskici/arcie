@@ -16,7 +16,7 @@
     "evals": "tsx --env-file=../../.env scripts/evals.ts",
     "check-token": "tsx --env-file=../../.env scripts/check-token.ts",
     "build": "tsx scripts/build-assets.ts",
-    "db:migrate": "tsx --env-file=../../.env scripts/migrate.ts"
+    "db:migrate": "node --env-file-if-exists=../../.env --import tsx scripts/migrate.ts"
   },
   "dependencies": {
     "@arcie/appkit": "workspace:^",

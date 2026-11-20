@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { isLoopbackDatabase } from "@arcie/db";
+import { databaseEndpoint } from "@arcie/db";
 import { loadEnv } from "./env.js";
 import type { createRuntime } from "./runtime.js";
 
@@ -8,8 +8,8 @@ async function startRuntime() {
   if (env.AUTH_MODE !== "privy" || !env.LLM_SHARED_SECRET) {
     throw new Error("Vercel requires AUTH_MODE=privy and LLM_SHARED_SECRET.");
   }
-  if (!isLoopbackDatabase(env.DATABASE_URL) &&
-      (new URL(env.DATABASE_URL).port !== "6543" || env.DATABASE_SSL !== "require")) {
+  const { loopback, port } = databaseEndpoint(env.DATABASE_URL);
+  if (!loopback && (port !== 6543 || env.DATABASE_SSL !== "require")) {
     throw new Error("Vercel requires the transaction pooler on port 6543 with verified TLS.");
   }
   const { createRuntime } = await import("./runtime.js");

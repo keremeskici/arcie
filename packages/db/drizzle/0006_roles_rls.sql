@@ -9,6 +9,12 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'arcie_runtime') THEN
     CREATE ROLE arcie_runtime NOLOGIN;
+  ELSIF EXISTS (
+    SELECT FROM pg_roles
+    WHERE rolname = 'arcie_runtime'
+      AND (rolcanlogin OR rolbypassrls OR rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication)
+  ) THEN
+    RAISE EXCEPTION 'arcie_runtime has incompatible role attributes';
   END IF;
 END
 $$;
