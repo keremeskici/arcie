@@ -1,3 +1,4 @@
+import { isLoopbackDatabase } from "@arcie/db";
 import { z } from "zod";
 
 const optional = z.preprocess((v) => (v === "" ? undefined : v), z.string().optional());
@@ -13,7 +14,10 @@ const schema = z.object({
   APPKIT_API_KEY: optional,
   ARC_RPC_URL: optional,
   ONRAMP_REFERRER_DOMAIN: optional,
-  DATABASE_URL: z.string().default("./arcie.db"),
+  DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/, hostname: /.+/ }),
+  DATABASE_POOL_MAX: z.coerce.number().int().positive().default(3),
+  DATABASE_SSL: z.preprocess((v) => v === "" ? undefined : v, z.enum(["require", "disable"]).optional()),
+  DATABASE_SSL_CA: optional,
   PORT: z.coerce.number().int().default(8787),
   DEMO_USER_ID: z.string().default("demo"),
   CONFIRM_CHANNELS: z.enum(["any", "screen"]).default("any"),
@@ -35,7 +39,10 @@ const schema = z.object({
   for (const k of ["PRIVY_APP_ID", "PRIVY_APP_SECRET", "CIRCLE_WALLET_SET_ID"] as const) {
     if (!e[k]) ctx.addIssue({ code: "custom", path: [k], message: "required when AUTH_MODE=privy" });
   }
-});
+}).transform((e) => ({
+  ...e,
+  DATABASE_SSL: e.DATABASE_SSL ?? (isLoopbackDatabase(e.DATABASE_URL) ? "disable" as const : "require" as const),
+}));
 
 export type Env = z.infer<typeof schema>;
 

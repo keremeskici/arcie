@@ -11,17 +11,28 @@ export interface DbOptions {
   /** Pool size. Keep it small on serverless (the Supabase pooler multiplexes). */
   max?: number;
   ssl?: "require" | false;
+  /** Optional certificate authority in PEM format. */
+  sslCa?: string;
 }
 
-/**
- * Opens a pooled connection. Never migrates (migrations run explicitly via `migrateDb`).
- * `prepare: false` keeps it compatible with the Supabase transaction pooler.
- */
+export function isLoopbackDatabase(url: string): boolean {
+  const { hostname } = new URL(url);
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+}
+
+export function databaseTls(url: string, options: Pick<DbOptions, "ssl" | "sslCa"> = {}): postgres.Options<{}>["ssl"] {
+  const required = options.ssl ?? !isLoopbackDatabase(url);
+  return required ? { rejectUnauthorized: true, ...(options.sslCa ? { ca: options.sslCa } : {}) } : false;
+}
+
+/** Opens a pool without migrating. Supavisor in transaction mode needs unnamed, serial queries. */
 export function createDb(url: string, opts: DbOptions = {}): { db: Db; close(): Promise<void> } {
+  const transactionPooler = new URL(url).port === "6543";
   const sql = postgres(url, {
-    max: opts.max ?? 5,
+    max: opts.max ?? 3,
     prepare: false,
-    ...(opts.ssl !== undefined ? { ssl: opts.ssl } : {}),
+    ssl: databaseTls(url, opts),
+    ...(transactionPooler ? { max_pipeline: 1, connect_timeout: 5, query_timeout: 10 } : {}),
     onnotice: () => {},
   });
   const db = drizzle(sql, { schema });

@@ -15,7 +15,8 @@
     "provision": "pnpm --filter @arcie/server provision",
     "evals": "pnpm --filter @arcie/server evals",
     "check-token": "pnpm --filter @arcie/server check-token",
-    "web": "pnpm --filter @arcie/web dev"
+    "web": "pnpm --filter @arcie/web dev",
+    "db:migrate": "pnpm --filter @arcie/server db:migrate"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

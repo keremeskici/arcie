@@ -3,15 +3,20 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "register-entity-secret": "tsx --env-file=../../.env scripts/register-entity-secret.ts",
     "provision": "tsx --env-file=../../.env scripts/provision.ts",
     "smoke": "tsx --env-file=../../.env scripts/smoke.ts",
-    "dev": "tsx watch --env-file=../../.env src/index.ts",
-    "start": "tsx --env-file=../../.env src/index.ts",
+    "dev": "tsx watch --env-file=../../.env src/local.ts",
+    "start": "tsx --env-file=../../.env src/local.ts",
     "chat": "tsx --env-file=../../.env scripts/chat.ts",
     "evals": "tsx --env-file=../../.env scripts/evals.ts",
-    "check-token": "tsx --env-file=../../.env scripts/check-token.ts"
+    "check-token": "tsx --env-file=../../.env scripts/check-token.ts",
+    "build": "tsx scripts/build-assets.ts",
+    "db:migrate": "tsx --env-file=../../.env scripts/migrate.ts"
   },
   "dependencies": {
     "@arcie/appkit": "workspace:^",

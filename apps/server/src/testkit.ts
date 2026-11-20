@@ -3,7 +3,7 @@ import { FakeAppKit, type WalletCreator, type WalletRef } from "@arcie/appkit";
 import { seed, wallets } from "@arcie/db";
 import { createTestDb } from "@arcie/db/testing";
 import { createHarness, DbPolicyProvider, EventLog } from "@arcie/harness";
-import { createApp, type AppDeps } from "./app.js";
+import { createApp, type AppDeps } from "./create-app.js";
 import { AuthError } from "./auth/errors.js";
 import { createIdentify, type AuthMode } from "./auth/identify.js";
 import { onboard } from "./auth/onboard.js";

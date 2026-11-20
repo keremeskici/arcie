@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import type { AppDeps } from "../app.js";
+import type { AppDeps } from "../create-app.js";
 import { screenCtx } from "./http.js";
 
 const eventBody = z.object({ type: z.enum(["submitted", "settled", "failed"]), payload: z.unknown().optional() });

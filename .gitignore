@@ -10,3 +10,4 @@ dist
 coverage
 recovery/
 .claude/worktrees/
+apps/server/public/assets/

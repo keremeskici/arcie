@@ -1,7 +1,7 @@
 import { ArcieError, type ActionKind } from "@arcie/core";
 import { Hono } from "hono";
 import { z } from "zod";
-import type { AppDeps } from "../app.js";
+import type { AppDeps } from "../create-app.js";
 import { reconcileIntent } from "../reconcile.js";
 import { screenCtx } from "./http.js";
 

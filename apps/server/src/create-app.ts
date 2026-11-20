@@ -1,6 +1,7 @@
 import type { AppKitPort } from "@arcie/appkit";
 import type { Db } from "@arcie/db";
 import type { EventLog, Harness } from "@arcie/harness";
+import { sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { authRoutes } from "./api/auth.js";
@@ -38,12 +39,19 @@ export interface AppDeps {
   onboard: (id: Identity) => ReturnType<typeof onboard>;
 }
 
-/** Composes every route; tests build it with fakes, index.ts with the real Circle kit + OpenAI. */
+/** Composes every route; tests build it with fakes, runtime.ts with the real Circle kit and OpenAI. */
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
   app.use("*", cors());
   app.onError((e, c) => errorResponse(c, e));
-  app.get("/health", (c) => c.json({ ok: true }));
+  app.get("/health", async (c) => {
+    try {
+      await deps.db.execute(sql`select 1`);
+      return c.json({ ok: true });
+    } catch {
+      return c.json({ error: { code: "UNKNOWN", message: "Service temporarily unavailable." } }, 503);
+    }
+  });
   app.route("/", uiRoutes());
   app.route("/", chatRoutes({ ...deps, authMode: deps.authMode, llmSecret: deps.llmSecret }));
   app.route("/", meRoutes(deps));

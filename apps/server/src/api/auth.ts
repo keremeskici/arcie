@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import type { AppDeps } from "../app.js";
+import type { AppDeps } from "../create-app.js";
 import { mintVoiceSession } from "../auth/identify.js";
 
 export function authRoutes(deps: AppDeps) {

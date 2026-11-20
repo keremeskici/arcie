@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import type { AppDeps } from "../app.js";
+import type { AppDeps } from "../create-app.js";
 
 const PING_MS = 15_000;
 const POLL_MS = 1_000;

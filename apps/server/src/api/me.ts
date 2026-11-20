@@ -6,7 +6,7 @@ import { desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { z } from "zod";
-import type { AppDeps } from "../app.js";
+import type { AppDeps } from "../create-app.js";
 import { reconcileUser } from "../reconcile.js";
 import { screenCtx } from "./http.js";
 

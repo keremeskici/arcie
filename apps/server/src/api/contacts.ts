@@ -4,7 +4,7 @@ import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import { getAddress, isAddress } from "viem";
 import { z } from "zod";
-import type { AppDeps } from "../app.js";
+import type { AppDeps } from "../create-app.js";
 import { screenCtx } from "./http.js";
 
 const contactBody = z.object({ name: z.string().trim().min(1).max(60), address: z.string() });

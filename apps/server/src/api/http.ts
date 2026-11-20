@@ -5,7 +5,7 @@ import { eq } from "drizzle-orm";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { randomUUID } from "node:crypto";
-import type { AppDeps } from "../app.js";
+import type { AppDeps } from "../create-app.js";
 import { AuthError } from "../auth/errors.js";
 
 export { AuthError };

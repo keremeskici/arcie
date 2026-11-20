@@ -1631,13 +1631,13 @@ const HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-export function uiRoutes() {
+export function uiRoutes(assetDir?: string) {
   const app = new Hono();
   app.get("/", (c) => c.html(HTML));
   app.get("/assets/onramp.js", async (c) => {
     c.header("Content-Type", "text/javascript; charset=utf-8");
     c.header("Cache-Control", "no-cache");
-    return c.body(await onrampClientBundle());
+    return c.body(await onrampClientBundle(assetDir));
   });
   return app;
 }
