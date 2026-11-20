@@ -79,7 +79,7 @@ describe("onboard", () => {
     const hold = new Promise<void>((r) => { release = r; });
     const has = new Promise<void>((r) => { locked = r; });
     const holder = db.transaction(async (tx) => {
-      await tx.select({ id: users.id }).from(users).where(eq(users.id, KEREM.userId)).for("update");
+      await tx.select({ id: users.id }).from(users).where(eq(users.id, KEREM.userId)).for("no key update");
       locked();
       await hold;
     });
@@ -89,7 +89,7 @@ describe("onboard", () => {
     for (let i = 0; i < 250 && !blocked; i++) {
       const rows = await db.execute<{ n: number }>(sql`
         select count(*)::int as n from pg_stat_activity
-        where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid() and query ilike '%for update%'`);
+        where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid() and query ilike '%for no key update%'`);
       blocked = rows[0]!.n >= 1;
       if (!blocked) await new Promise((r) => setTimeout(r, 10));
     }

@@ -98,9 +98,14 @@ export async function releaseConfirmation(db: Db | Tx, intentId: string, token: 
 
 const STALE_CONSENT = "The details changed. Please check the new card and confirm again.";
 
-/** Takes the user's budget lock: the first lock in the fixed order users row, claim row, intent row. */
+/**
+ * Takes the user's budget lock: the first lock in the fixed order users row, claim row, intent row. It is FOR NO
+ * KEY UPDATE, not FOR UPDATE: that still serializes every budget locker (it conflicts with itself) but does not
+ * conflict with the FOR KEY SHARE that foreign-key inserts (intents.user_id) take on the users row, so a
+ * publish/cancel holding an intent row can't deadlock with an execution claim waiting on that intent.
+ */
 export async function lockUserBudget(tx: Tx, userId: string): Promise<void> {
-  const rows = await tx.select({ id: users.id }).from(users).where(eq(users.id, userId)).for("update");
+  const rows = await tx.select({ id: users.id }).from(users).where(eq(users.id, userId)).for("no key update");
   if (rows.length === 0) throw new ArcieError("NOT_FOUND", { detail: { user: userId } });
 }
 
