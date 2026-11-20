@@ -70,6 +70,36 @@ async function holdBudgetLock(db: Db, whileHeld?: (tx: Parameters<Parameters<Db[
 }
 
 describe("per-user budget lock", () => {
+  it("reserves spend across a direct screen swap and a separate instance's confirmation", async () => {
+    const s = await setup();
+    const sendId = await s.propose(s.b, "s2", "6");
+    const swap = { tokenIn: "USDC", tokenOut: "EURC", amountIn: "6" } as const;
+    const { data } = await s.a.h.quoteSwap(s.ctx("s1"), swap);
+    let entered!: () => void;
+    let release!: () => void;
+    const submitting = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const original = s.a.kit.swap.bind(s.a.kit);
+    s.a.kit.swap = async (...args) => {
+      entered();
+      await gate;
+      return original(...args);
+    };
+    const request = { ...swap, minOut: data.minOut, requestId: "direct-swap" };
+    const direct = s.a.h.screenSwap(s.ctx("s1"), request);
+    try {
+      await Promise.race([submitting, direct]);
+      expect(await errOf(s.b.h.confirm(s.ctx("s2"), sendId, "screen"))).toMatchObject({ code: "POLICY_DENIED" });
+      expect(sends(s.b.kit)).toHaveLength(0);
+      expect(await s.b.h.screenSwap(s.ctx("s3"), request)).toMatchObject({ status: "executing" });
+    } finally {
+      release();
+    }
+    expect(await direct).toMatchObject({ status: "succeeded" });
+    expect(s.a.kit.calls.filter((c) => c.method === "swap")).toHaveLength(1);
+    expect(s.b.kit.calls.filter((c) => c.method === "swap")).toHaveLength(0);
+  });
+
   it("separate intents share one budget", async () => {
     const s = await setup();
     const idA = await s.propose(s.a, "s1", "6");

@@ -1,15 +1,16 @@
-import { getChain, type Fee, type TxResult, type WalletRef } from "@arcie/appkit";
-import { ArcieError, parseAmount, type ActionKind, type ConfirmIsland, type TokenSymbol, tokenName } from "@arcie/core";
+import { getChain, isSavingsAddress, type Fee, type TxResult, type WalletRef } from "@arcie/appkit";
+import { DEFAULT_LIMITS, ArcieError, formatAmount, parseAmount, type ActionKind, type ConfirmIsland, type TokenSymbol, tokenName } from "@arcie/core";
 import type { HarnessCtx } from "./context.js";
+import { buildSavingsConfirm } from "./disclosure/savings.js";
 import { buildEarnConfirm } from "./disclosure/earn.js";
-import { feeValue } from "./disclosure/prompt.js";
+import { apyText, feeRows, feeValue } from "./disclosure/prompt.js";
 import { buildSendConfirm } from "./disclosure/send.js";
 import { buildSwapConfirm } from "./disclosure/swap.js";
-import { checkPolicy } from "./policy/check.js";
-import { balancesOf, ceilDecimals, gasFeeTotal, resolveRecipient, resolveVault, usdValueOf, type Svc } from "./services.js";
+import { checkFunds, checkPolicy } from "./policy/check.js";
+import { balancesOf, ceilDecimals, gasFeeTotal, resolveRecipient, resolveVault, usdValueOf, walletFor, type Svc } from "./services.js";
 
 export type Prepared =
-  | { type: "choice"; question: string; options: { id: string; label: string; detail: string }[] }
+  | { type: "choice"; send: { amount: string; token: TokenSymbol }; question: string; options: { id: string; label: string; detail: string }[] }
   | { type: "rejected"; code: "POLICY_DENIED" | "INSUFFICIENT_BALANCE"; reason: string; params: Record<string, unknown>; usdValue: number }
   | {
       type: "ready";
@@ -34,29 +35,45 @@ async function common(svc: Svc, ctx: HarnessCtx, w: WalletRef) {
 // ---------- send ----------
 export interface SendArgs { to: string; amount: string; token: TokenSymbol }
 
+async function sendFunds(svc: Pick<Svc, "kit">, w: WalletRef, balances: Record<TokenSymbol, string>, to: `0x${string}`, token: TokenSymbol, amount: string) {
+  const decimals = decimalsOf(w, token);
+  const balance = balances[token] ?? "0";
+  const sendAll = amount === "all";
+  if (sendAll && /^0(\.0+)?$/.test(balance)) throw new ArcieError("INSUFFICIENT_BALANCE", { spoken: `You don't have any ${tokenName(token)} to send.` });
+  const requested = sendAll ? balance : amount;
+  // A one-base-unit transfer can be simulated without first spending the full balance on gas.
+  const { fee } = await svc.kit.estimateSend(w, { to, amount: sendAll ? formatAmount(1n, decimals) : requested, token });
+  if (sendAll && (fee.amount === null || fee.token === null)) throw new ArcieError("RPC_UNAVAILABLE", { spoken: "The network fee is unavailable. Try Send all again." });
+  const gas = getChain(w.chain).gasToken;
+  const rounded = fee.amount === null ? null : ceilDecimals(fee.amount, decimalsOf(w, gas));
+  const funds = { token, amount: requested, balance, fee: { amount: rounded, token: fee.token }, sendAll, gasBalance: balances[gas] ?? "0", decimals };
+  return { fee, funds };
+}
+
+/** Read-only maximum. Spending limits are enforced when the actual request is reviewed. */
+export async function quoteSendMax(svc: Pick<Svc, "kit" | "db">, ctx: HarnessCtx, to: string | undefined, token: TokenSymbol) {
+  const recipient = to ? await resolveRecipient(svc, ctx.userId, to) : undefined;
+  if (recipient?.kind === "choice") throw new ArcieError("INVALID_RECIPIENT", { spoken: "Choose the exact contact to calculate the amount." });
+  const w = await walletFor(svc, ctx);
+  const balances = await balancesOf(svc, w);
+  if (!recipient) return { amount: balances[token] ?? "0", feeChecked: false };
+  const { funds } = await sendFunds(svc, w, balances, recipient.recipient.address, token, "all");
+  const result = checkFunds(funds);
+  if (!result.ok) throw new ArcieError(result.code, { spoken: result.reason });
+  return { amount: result.amount, feeChecked: true };
+}
+
 async function prepareSend(svc: Svc, ctx: HarnessCtx, w: WalletRef, a: SendArgs): Promise<Prepared> {
   const rec = await resolveRecipient(svc, ctx.userId, a.to);
-  if (rec.kind === "choice") return { type: "choice", question: "Which contact did you mean?", options: rec.options };
+  if (rec.kind === "choice") return { type: "choice", send: { amount: a.amount, token: a.token }, question: "Which contact did you mean?", options: rec.options };
   const r = rec.recipient;
-  const decimals = decimalsOf(w, a.token);
-  const sendAll = a.amount === "all";
-  if (!sendAll) parseAmount(a.amount, decimals);
+  if (a.amount !== "all") parseAmount(a.amount, decimalsOf(w, a.token));
 
-  const { limits, balances, spent, gas } = await common(svc, ctx, w);
-  const balance = balances[a.token] ?? "0";
-  if (sendAll && /^0(\.0+)?$/.test(balance)) throw new ArcieError("INSUFFICIENT_BALANCE", { spoken: `You don't have any ${tokenName(a.token)} to send.` });
-  const requested = sendAll ? balance : a.amount;
-  // Fee barely depends on the amount; quoting the full balance can fail gas simulation, so quote a tiny send.
-  const { fee } = await svc.kit.estimateSend(w, { to: r.address, amount: sendAll ? "0.000001" : requested, token: a.token });
-  const feeRounded = fee.amount === null ? null : ceilDecimals(fee.amount, decimalsOf(w, gas));
-  const usdValue = await usdValueOf(svc, w, a.token, requested);
-
-  const res = checkPolicy({
-    action: "send", token: a.token, amount: requested, usdValue, limits, spentTodayUsd: spent, balance,
-    fee: { amount: feeRounded, token: fee.token }, recipient: { known: r.known }, sendAll,
-    gasBalance: balances[gas] ?? "0", decimals,
-  });
-  const params = { to: r.address, amount: sendAll ? "all" : a.amount, token: a.token };
+  const { limits, balances, spent } = await common(svc, ctx, w);
+  const { fee, funds } = await sendFunds(svc, w, balances, r.address, a.token, a.amount);
+  const usdValue = await usdValueOf(svc, w, a.token, funds.amount);
+  const res = checkPolicy({ ...funds, action: "send", usdValue, limits, spentTodayUsd: spent, recipient: { known: r.known } });
+  const params = { to: r.address, amount: a.amount, token: a.token };
   if (!res.ok) return { type: "rejected", code: res.code, reason: res.reason, params, usdValue };
 
   const money = `${res.amount} ${tokenName(a.token)}`;
@@ -68,7 +85,7 @@ async function prepareSend(svc: Svc, ctx: HarnessCtx, w: WalletRef, a: SendArgs)
     requireScreen: res.requireScreen,
     estimated: { Sent: money, "Network fee": feeValue(fee) },
     buildIsland: (intentId, expiresAt) =>
-      buildSendConfirm({ intentId, amount: res.amount, token: a.token, recipientLabel: r.label, recipientIsNew: !r.known, fee, adjustments: res.adjustments, expiresAt }),
+      buildSendConfirm({ intentId, amount: res.amount, token: a.token, recipientLabel: r.label, recipientAddress: r.address, recipientIsNew: !r.known, fee, adjustments: res.adjustments, expiresAt }),
   };
 }
 
@@ -79,6 +96,8 @@ async function executeSend(svc: Svc, w: WalletRef, p: Record<string, unknown>): 
 }
 
 // ---------- swap ----------
+export const defaultSwapSlippage = (accountCap: number) => Math.min(DEFAULT_LIMITS.maxSlippageBps, accountCap);
+
 export interface SwapArgs { tokenIn: TokenSymbol; tokenOut: TokenSymbol; amountIn: string; maxSlippageBps?: number | undefined }
 
 export async function quoteSwap(svc: Svc, w: WalletRef, a: { tokenIn: TokenSymbol; tokenOut: TokenSymbol; amountIn: string }, slippageBps: number) {
@@ -90,9 +109,9 @@ export async function quoteSwap(svc: Svc, w: WalletRef, a: { tokenIn: TokenSymbo
   return svc.kit.estimateSwap(w, { ...a, slippageBps });
 }
 
-async function prepareSwap(svc: Svc, ctx: HarnessCtx, w: WalletRef, a: SwapArgs): Promise<Prepared> {
+export async function prepareSwap(svc: Svc, ctx: HarnessCtx, w: WalletRef, a: SwapArgs): Promise<Exclude<Prepared, { type: "choice" }>> {
   const { limits, balances, spent, gas } = await common(svc, ctx, w);
-  const slippageBps = a.maxSlippageBps ?? limits.maxSlippageBps;
+  const slippageBps = a.maxSlippageBps ?? defaultSwapSlippage(limits.maxSlippageBps);
   const est = await quoteSwap(svc, w, a, slippageBps);
   const usdValue = await usdValueOf(svc, w, a.tokenIn, a.amountIn);
   const res = checkPolicy({
@@ -151,7 +170,8 @@ async function prepareDeposit(svc: Svc, ctx: HarnessCtx, w: WalletRef, a: EarnDe
     action: "earn_deposit", token: vault.token, amount: a.amount, usdValue, limits, spentTodayUsd: spent,
     balance: balances[vault.token] ?? "0", fee: gasFeeTotal(q.fees, w.chain), gasBalance: balances[gas] ?? "0", decimals,
   });
-  const params = { vault: vault.address, vaultName: q.vaultName, amount: a.amount, token: vault.token };
+  const savings = vault.token === "USDC" && isSavingsAddress(w.chain, vault.address);
+  const params = { vault: vault.address, vaultName: savings ? "Savings" : q.vaultName, amount: a.amount, token: vault.token };
   if (!res.ok) return { type: "rejected", code: res.code, reason: res.reason, params, usdValue };
   return {
     type: "ready",
@@ -159,16 +179,18 @@ async function prepareDeposit(svc: Svc, ctx: HarnessCtx, w: WalletRef, a: EarnDe
     preview: { apy: q.apy, fees: q.fees },
     usdValue,
     requireScreen: false,
-    estimated: { Invested: `${a.amount} ${tokenName(vault.token)}` },
+    estimated: { [savings ? "Added to savings" : "Invested"]: `${a.amount} ${tokenName(vault.token)}` },
     buildIsland: (intentId, expiresAt) =>
+      savings ? buildSavingsConfirm({ intentId, direction: "deposit", amount: `${a.amount} USD`, annualRate: apyText(q.apy), fees: feeRows(q.fees), adjustments: res.adjustments, expiresAt }) :
       buildEarnConfirm({ intentId, direction: "deposit", vaultName: q.vaultName, amount: a.amount, token: vault.token, apy: q.apy, fees: q.fees, adjustments: res.adjustments, expiresAt }),
   };
 }
 
 async function prepareWithdraw(svc: Svc, ctx: HarnessCtx, w: WalletRef, a: EarnWithdrawArgs): Promise<Prepared> {
   const vault = await resolveVault(svc, w.chain, a.vault);
+  const savings = vault.token === "USDC" && isSavingsAddress(w.chain, vault.address);
   const position = await svc.kit.getPosition(w, vault.address);
-  if (!position) throw new ArcieError("NOT_FOUND", { spoken: "You don't have money in that vault." });
+  if (!position) throw new ArcieError("NOT_FOUND", { spoken: savings ? "You have no money in savings to withdraw." : "You don't have money in that investment." });
   const amount = a.amount === "all" ? position.currentBalance : a.amount;
   const decimals = decimalsOf(w, vault.token);
   parseAmount(amount, decimals);
@@ -181,7 +203,7 @@ async function prepareWithdraw(svc: Svc, ctx: HarnessCtx, w: WalletRef, a: EarnW
     balance: position.currentBalance, fee: gasFeeTotal(q.fees, w.chain), decimals,
     gasBalance: balances[gas] ?? "0", feeFromWallet: true,
   });
-  const params = { vault: vault.address, vaultName: vault.name, amount, token: vault.token };
+  const params = { vault: vault.address, vaultName: savings ? "Savings" : vault.name, amount, token: vault.token };
   if (!res.ok) return { type: "rejected", code: res.code, reason: res.reason, params, usdValue };
   return {
     type: "ready",
@@ -191,6 +213,7 @@ async function prepareWithdraw(svc: Svc, ctx: HarnessCtx, w: WalletRef, a: EarnW
     requireScreen: false,
     estimated: { "Back in your wallet": `${q.expectedAmount} ${tokenName(vault.token)}` },
     buildIsland: (intentId, expiresAt) =>
+      savings ? buildSavingsConfirm({ intentId, direction: "withdraw", amount: `${amount} USD`, annualRate: apyText(vault.apy), fees: feeRows(q.fees), expected: `${q.expectedAmount} USD`, adjustments: res.adjustments, expiresAt }) :
       buildEarnConfirm({ intentId, direction: "withdraw", vaultName: vault.name, amount, token: vault.token, apy: position.apy, fees: q.fees, expectedAmount: q.expectedAmount, adjustments: res.adjustments, expiresAt }),
   };
 }
@@ -198,6 +221,11 @@ async function prepareWithdraw(svc: Svc, ctx: HarnessCtx, w: WalletRef, a: EarnW
 async function executeDeposit(svc: Svc, w: WalletRef, p: Record<string, unknown>): Promise<Executed> {
   const { vault, vaultName, amount, token } = p as { vault: `0x${string}`; vaultName: string; amount: string; token: TokenSymbol };
   const tx = await svc.kit.deposit(w, { vault, amount });
+  if (token === "USDC" && isSavingsAddress(w.chain, vault)) {
+    // Older reviews estimated "Invested". Keep the receipt columns aligned with that approval.
+    const label = vaultName === "Savings" ? "Added to savings" : "Invested";
+    return { tx, actual: { [label]: `${amount} USD` }, summary: `${amount} USD was added to your savings.`, balanceToken: token };
+  }
   return { tx, actual: { Invested: `${amount} ${tokenName(token)}` }, summary: `Done. ${amount} ${tokenName(token)} is now earning in ${vaultName}.`, balanceToken: token };
 }
 

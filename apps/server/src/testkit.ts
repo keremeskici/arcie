@@ -10,6 +10,7 @@ import { createIdentify, type AuthMode } from "./auth/identify.js";
 import { onboard } from "./auth/onboard.js";
 import type { TokenVerifier } from "./auth/verifier.js";
 import type { AgentFn } from "./llm/route.js";
+import { refreshIntentStatus } from "./reconcile.js";
 
 export const DEMO_WALLET: WalletRef = { chain: "Arc_Testnet", address: "0x000000000000000000000000000000000000dEaD", circleWalletId: "w1" };
 
@@ -53,7 +54,10 @@ export async function testApp({ demoWalletSecret, ...over }: Partial<AppDeps> & 
   kit.setBalance(DEMO_WALLET, "USDC", "100");
   kit.setBalance(DEMO_WALLET, "EURC", "20");
   const events = new EventLog(db);
-  const harness = createHarness({ db, kit, policy: new DbPolicyProvider(db), events });
+  const harness = createHarness({
+    db, kit, policy: new DbPolicyProvider(db), events, tokenUsdPrice: over.tokenUsdPrice,
+    refreshIntentStatus: (intent) => refreshIntentStatus({ db, kit, events }, intent, 1_000),
+  });
   const authMode = over.authMode ?? "dev";
   const demoWalletAuth = demoWalletSecret ? createDemoWalletAuth(demoWalletSecret, "demo") : undefined;
   const circle = fakeCircle();

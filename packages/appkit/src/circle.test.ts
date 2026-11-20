@@ -56,6 +56,8 @@ it("keeps swap settlement unknown when Circle has no record of the submitted has
   const kit = createCircleAppKit({ circleApiKey: "TEST_API_KEY:fixture:fixture", entitySecret: "e".repeat(64), onrampApiKey: "test" });
   sdk.waitForSwap.mockResolvedValue({ progress: { status: "NOT_FOUND" } });
   expect((await kit.waitForSwap(w, "0x123", 10)).status).toBe("PENDING");
+  sdk.waitForSwap.mockResolvedValue({ progress: { status: "FAILED" } });
+  expect((await kit.waitForSwap(w, "0x123", 10)).status).toBe("FAILED");
 });
 
 it("accepts only a matching reported swap source hash, ignoring case", async () => {

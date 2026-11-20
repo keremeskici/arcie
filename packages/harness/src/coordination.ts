@@ -40,6 +40,20 @@ export async function beginProposal(db: DbOrTx, sessionId: string): Promise<numb
   return row!.generation;
 }
 
+/** The shared lock for mutations which may close an open review or change its event stream. */
+export async function lockSessionState(tx: Tx, sessionId: string) {
+  await tx.insert(sessionState).values({ sessionId }).onConflictDoNothing();
+  const [row] = await tx.select().from(sessionState).where(eq(sessionState.sessionId, sessionId)).for("update");
+  return row!;
+}
+
+export async function invalidateProposals(tx: Tx, sessionId: string) {
+  await tx.update(sessionState).set({
+    proposalGeneration: sql`${sessionState.proposalGeneration} + 1`,
+    preparingGeneration: null,
+  }).where(eq(sessionState.sessionId, sessionId));
+}
+
 /**
  * Cancel: invalidates any preparation in flight and runs `fn` under the same session_state row lock, so it
  * serializes with `publishProposal` (a card published first is visible to `fn`; a later publish is refused).
@@ -47,13 +61,9 @@ export async function beginProposal(db: DbOrTx, sessionId: string): Promise<numb
  */
 export async function cancelUnderLock<T>(db: Db, sessionId: string, fn: (tx: Tx, preparing: boolean) => Promise<T>): Promise<T> {
   return db.transaction(async (tx) => {
-    await tx.insert(sessionState).values({ sessionId }).onConflictDoNothing();
-    const [row] = await tx.select().from(sessionState).where(eq(sessionState.sessionId, sessionId)).for("update");
-    await tx
-      .update(sessionState)
-      .set({ proposalGeneration: row!.proposalGeneration + 1, preparingGeneration: null })
-      .where(eq(sessionState.sessionId, sessionId));
-    return fn(tx, row!.preparingGeneration !== null);
+    const row = await lockSessionState(tx, sessionId);
+    await invalidateProposals(tx, sessionId);
+    return fn(tx, row.preparingGeneration !== null);
   });
 }
 
@@ -111,7 +121,7 @@ export async function releaseConfirmation(db: Db | Tx, intentId: string, token: 
 const STALE_CONSENT = "The details changed. Please check the new card and confirm again.";
 
 /**
- * Takes the user's budget lock: the first lock in the fixed order users row, claim row, intent row. It is FOR NO
+ * Takes the user's budget lock: the first lock in the fixed order users row, session_state row, claim row, intent row. It is FOR NO
  * KEY UPDATE, not FOR UPDATE: that still serializes every budget locker (it conflicts with itself) but does not
  * conflict with the FOR KEY SHARE that foreign-key inserts (intents.user_id) take on the users row, so a
  * publish/cancel holding an intent row can't deadlock with an execution claim waiting on that intent.
@@ -135,6 +145,7 @@ export interface ClaimExecutionArgs {
   policy: PolicyProvider;
   /** Throws when the action is not allowed; receives the limits and spend read under the budget lock. */
   check: (limits: AgentLimits, spentTodayUsd: number) => void;
+  onClaim: (tx: Tx) => Promise<void>;
 }
 
 /** Lock the lease before the intent so quote writes validate expiry after any row-lock wait. */
@@ -148,11 +159,12 @@ export async function lockConfirmRows(tx: Tx, intentId: string, token: string) {
 /**
  * Moves an intent to `executing` under the user's budget lock, so intents of one user (in any session or on any
  * instance) can't both pass the daily limit, and limits are the ones in force at this moment. Lock order is
- * fixed: users row, then the claim row, then the intent row. Returns `false` when the
+ * fixed: users row, session_state row, claim row, then intent row. Returns `false` when the
  * intent is no longer awaiting confirmation. Call inside one short transaction and never over a network call.
  */
 export async function claimExecution(tx: Tx, a: ClaimExecutionArgs): Promise<boolean | "screen_only" | "stale_quote"> {
   await lockUserBudget(tx, a.userId);
+  await lockSessionState(tx, a.ctx.sessionId);
   await tx.select({ token: confirmClaims.token }).from(confirmClaims)
     .where(and(eq(confirmClaims.intentId, a.intentId), eq(confirmClaims.token, a.token))).for("update");
   const limits = await a.policy.getLimits(a.userId, tx);
@@ -166,7 +178,10 @@ export async function claimExecution(tx: Tx, a: ClaimExecutionArgs): Promise<boo
   if (current.paramsHash !== a.paramsHash) throw new ArcieError("POLICY_DENIED", { spoken: STALE_CONSENT });
   a.check(limits, spent);
   // Atomic with the status change: token live and revision unchanged since the claim, or nothing executes.
-  if (await repo.executeFenced(a.intentId, { token: a.token, revision: a.revision }, { confirmedVia: a.channel })) return true;
+  if (await repo.executeFenced(a.intentId, { token: a.token, revision: a.revision }, { confirmedVia: a.channel })) {
+    await a.onClaim(tx);
+    return true;
+  }
   const [expiry] = await tx.execute<{ expired: boolean; staleQuote: boolean }>(sql`select
     ${current.expiresAt}::timestamptz <= clock_timestamp() as expired,
     ${current.quoteAt}::timestamptz < clock_timestamp() - ${QUOTE_FRESH_MS} * interval '1 millisecond' as "staleQuote"`);

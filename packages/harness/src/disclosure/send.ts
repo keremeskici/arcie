@@ -8,6 +8,7 @@ export function buildSendConfirm(i: {
   amount: string;
   token: TokenSymbol;
   recipientLabel: string;
+  recipientAddress?: string;
   recipientIsNew: boolean;
   fee: Fee;
   adjustments: string[];
@@ -17,9 +18,12 @@ export function buildSendConfirm(i: {
   const fee = feeValue(i.fee);
   const risks = ["Onchain transfers can't be reversed.", ...(i.recipientIsNew ? ["This is a new recipient."] : [])];
   const phrase = feePhrase([i.fee]);
+  const spokenRecipient = i.recipientIsNew ? "a new recipient" : i.recipientLabel;
 
   return {
     kind: "confirm",
+    action: "send",
+    send: { amount: i.amount, token: i.token, recipient: i.recipientLabel, ...(i.recipientAddress ? { address: i.recipientAddress } : {}) },
     intentId: i.intentId,
     title: `Send ${money} to ${i.recipientLabel}?`,
     chips: ["Send", tokenName(i.token), "Arc"],
@@ -38,7 +42,7 @@ export function buildSendConfirm(i: {
     buttons: { ...BUTTONS },
     expiresAt: i.expiresAt,
     spokenPrompt: promptWithFallback(
-      `Send ${money} to ${i.recipientLabel}${phrase ? `, ${phrase}` : ""}.`,
+      `Send ${money} to ${spokenRecipient}${phrase ? `, ${phrase}` : ""}.`,
       `Send ${money}?`,
     ),
   };

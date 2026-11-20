@@ -28,6 +28,7 @@ describe("hosted demo wallet", () => {
     expect(account.user.id).toBe("demo");
     expect(account.wallet).toEqual({ address: DEMO_WALLET.address, chain: "Arc_Testnet" });
     expect((await call("GET", "/balances", undefined, headers)).status).toBe(200);
+    expect(await (await call("GET", "/savings", undefined, headers)).json()).toMatchObject({ available: true });
     expect((await call("POST", "/voice/session", {}, headers)).status).toBe(200);
     expect((await call("GET", "/balances", undefined, { authorization: `Bearer ${token}x` })).status).toBe(401);
   });
@@ -60,6 +61,8 @@ describe("identify in privy mode", () => {
     const r = await call("GET", "/balances");
     expect(r.status).toBe(401);
     expect((await r.json()).error.code).toBe("UNAUTHENTICATED");
+    expect((await call("GET", "/savings")).status).toBe(401);
+    expect((await call("POST", "/chat", { messages: [{ role: "user", content: "hello" }] })).status).toBe(401);
   });
 
   it("rejects a bad token", async () => {
@@ -128,6 +131,34 @@ describe("voice sessions", () => {
     expect(seen[0]).toMatchObject({ userId: "demo", sessionId, channel: "voice" });
   });
 
+  it("preserves turn order across a reopened conversation and rejects the old conversation", async () => {
+    const seen: HarnessCtx[] = [];
+    const agent: AgentFn = async function* (ctx) {
+      seen.push(ctx);
+      yield "ok";
+    };
+    const { call } = await testApp({ authMode: "privy", agent });
+    const { sessionId } = await (await call("POST", "/voice/session", {}, bearer("demo"))).json();
+    const headers = { ...bearer("demo"), "x-arcie-session": sessionId };
+    const start = async () => {
+      const response = await call("POST", "/voice/conversation", {}, headers);
+      expect(response.status).toBe(200);
+      return (await response.json()).conversationId as string;
+    };
+    const speak = (conversationId: string, count: number) => call("POST", "/v1/chat/completions", {
+      messages: Array.from({ length: count }, (_, i) => ({ role: "user", content: `Turn ${i + 1}` })),
+      elevenlabs_extra_body: { session_id: sessionId, arcie_conversation_id: conversationId },
+    });
+    const first = await start();
+    expect((await speak(first, 7)).status).toBe(200);
+    expect((await call("POST", "/voice/conversation", {}, { ...bearer("eve"), "x-arcie-session": sessionId })).status).toBe(401);
+    const next = await start();
+    expect((await speak(next, 1)).status).toBe(200);
+    expect((await speak(first, 8)).status).toBe(409);
+    expect((await speak(next, 2)).status).toBe(200);
+    expect(seen.map((ctx) => ctx.userTurn)).toEqual([7, 9, 10]);
+  });
+
   it("rejects unknown and expired sessions on the custom-LLM endpoint", async () => {
     const { call, db } = await testApp({ authMode: "privy" });
     const body = (sid: string) => ({ messages: [{ role: "user", content: "hi" }], session_id: sid });
@@ -159,12 +190,15 @@ it("binds implicit screen sessions to the verified user and requires issued live
   }
 });
 
-it.each(["publish", "confirm"] as const)("new typed turn fences an older voice %s on another instance", async (kind) => {
+it.each([
+  ["typed turn", "publish"], ["typed turn", "confirm"], ["replacement conversation", "publish"], ["replacement conversation", "confirm"],
+] as const)("a %s fences an older voice %s on another instance", async (change, kind) => {
   const { createDb } = await import("@arcie/db");
   const a = await testApp({ authMode: "privy" });
   const peer = createDb(a.url);
   const sessionId = (await (await a.call("POST", "/voice/session", {}, bearer("demo"))).json()).sessionId;
   const headers = { ...bearer("demo"), "x-arcie-session": sessionId };
+  const { conversationId } = await (await a.call("POST", "/voice/conversation", {}, headers)).json();
   const proposed = await (await a.call("POST", "/intents", { kind: "send", params: { to: "Bob", token: "USDC", amount: "1" } }, headers)).json();
   const entered = latch();
   const gate = latch();
@@ -182,9 +216,12 @@ it.each(["publish", "confirm"] as const)("new typed turn fences an older voice %
     const old = await testApp({ db: a.db, authMode: "privy", agent });
     const newer = await testApp({ db: peer.db, authMode: "privy" });
     const msg = { role: "user", content: "fixture" };
-    const working = old.call("POST", "/v1/chat/completions", { session_id: sessionId, messages: [msg] });
+    const working = old.call("POST", "/v1/chat/completions", { session_id: sessionId, arcie_conversation_id: conversationId, messages: [msg] });
     await entered.promise;
-    expect((await newer.call("POST", "/chat", { messages: [msg, msg] }, headers)).status).toBe(200);
+    const next = change === "typed turn"
+      ? await newer.call("POST", "/chat", { messages: [msg, msg] }, headers)
+      : await newer.call("POST", "/voice/conversation", {}, headers);
+    expect(next.status).toBe(200);
     gate.resolve();
     await working;
     expect(a.kit.calls).toHaveLength(0);

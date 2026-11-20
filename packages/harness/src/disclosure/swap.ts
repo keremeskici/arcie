@@ -48,7 +48,7 @@ export function buildSwapConfirm(i: {
     buttons: { ...BUTTONS },
     expiresAt: i.expiresAt,
     spokenPrompt: promptWithFallback(
-      `Swap ${pay} for about ${get}, at least ${i.minOut}${phrase ? `, ${phrase}` : ""}.`,
+      `Swap ${pay} for about ${get}, at least ${min}${phrase ? `, ${phrase}` : ""}.`,
       `Swap ${pay} for about ${get}.`,
     ),
   };

@@ -30,7 +30,7 @@
   ],
   "rewrites": [
     {
-      "source": "/:route(config|me|balances|activity|intents|choices|receive|contacts|auth|voice|events|onramp|v1|health|vaults|quotes|chat)/:path*",
+      "source": "/:route(config|me|balances|savings|activity|intents|swaps|choices|receive|contacts|auth|voice|events|onramp|v1|health|vaults|quotes|chat)/:path*",
       "destination": {
         "service": "server"
       }

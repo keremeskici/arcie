@@ -1,7 +1,6 @@
 /// <reference lib="dom" />
 import type { OnrampIsland } from "@arcie/core";
 import type { OnrampIframeOptions } from "@circle-fin/onramp-kit";
-import { parseOnrampSession } from "@circle-fin/onramp-kit";
 
 type Params = { token?: string; amount?: string };
 type EventType = "submitted" | "settled" | "failed";
@@ -33,10 +32,6 @@ export function createOnrampController(deps: Dependencies) {
   let latestRequestId: string | undefined;
   let lastParams: Params = {};
   const seen = new Set<string>();
-  const loadKit = deps.loadKit ?? (async (environment) => {
-    const { createOnrampKit } = await import("@circle-fin/onramp-kit");
-    return createOnrampKit({ widgetBaseUrl: environment === "sandbox" ? "https://onramp-sandbox.arc.io" : "https://onramp.arc.io" });
-  });
 
   function dispose() {
     widget?.close();
@@ -89,12 +84,18 @@ export function createOnrampController(deps: Dependencies) {
       });
     }
     try {
-      const kit = await loadKit(island.environment);
+      const [sdk, providedKit] = await Promise.all([
+        import("@circle-fin/onramp-kit"),
+        deps.loadKit?.(island.environment),
+      ]);
       if (current !== generation) return;
+      const kit = providedKit ?? sdk.createOnrampKit({
+        widgetBaseUrl: island.environment === "sandbox" ? "https://onramp-sandbox.arc.io" : "https://onramp.arc.io",
+      });
       widget = kit.mountIframe({
         // The SDK parser supports actual provider responses that omit sessionId.
         // Do not synthesize provider IDs or relax the SDK's message origin checks.
-        session: parseOnrampSession(island),
+        session: sdk.parseOnrampSession(island),
         container: view.container,
         loadTimeout: 20_000,
         onInitializationSuccess: () => {
@@ -167,16 +168,20 @@ export function createOnrampController(deps: Dependencies) {
     }
   }
 
-  function close() {
+  function destroy() {
     ++generation;
     latestRequestId = undefined;
     dismissedRequest = pendingRequest;
     dispose();
+  }
+
+  function close() {
+    destroy();
     view.hide();
     refresh();
   }
 
-  return { open, start, close, retry: () => start(lastParams) };
+  return { open, start, close, destroy, retry: () => start(lastParams) };
 }
 
 /** Connect the controller to the existing plain-HTML screen. */

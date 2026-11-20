@@ -18,6 +18,13 @@ export interface ReconcileDeps {
   now?: () => Date;
 }
 
+/** Refreshes a user's already-loaded intent through the same durable claim as other settlement readers. */
+export async function refreshIntentStatus(deps: ReconcileDeps, intent: Intent, timeoutMs = DEFAULT_BUDGET_MS): Promise<Intent> {
+  if (intent.status !== "executing") return intent;
+  await reconcileIntent(deps, intent.id, timeoutMs).catch(() => console.error("Settlement check failed"));
+  return (await new IntentRepo(deps.db).get(intent.id)) ?? intent;
+}
+
 /**
  * Settlement recovery for one executing intent, run when a client reads it (serverless has no reliable startup).
  * Observes only: it never resubmits a money action. Returns true when this call moved the intent to a terminal state.

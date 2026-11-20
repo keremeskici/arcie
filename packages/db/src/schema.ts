@@ -1,4 +1,4 @@
-import type { ActionKind, AgentLimits, ChainId, Channel, IslandPayload } from "@arcie/core";
+import type { ActionKind, AgentLimits, ChainId, Channel, ChoiceIsland, IslandPayload } from "@arcie/core";
 import { sql } from "drizzle-orm";
 import { bigint, check, integer, jsonb, pgSchema, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
@@ -74,6 +74,8 @@ export const sessions = table("sessions", {
   channel: text("channel").$type<Channel>().notNull(),
   /** Count of user messages seen; voice confirm needs userTurn > intent.previewTurn. */
   userTurn: integer("user_turn").notNull().default(0),
+  conversationId: text("conversation_id"),
+  conversationStartTurn: integer("conversation_start_turn").notNull().default(0),
   /** Voice sessions minted for a logged-in user expire; null = private screen default or dev/legacy session. */
   expiresAt: text("expires_at"),
 });
@@ -167,6 +169,11 @@ export const choices = table("choices", {
     .$type<{ id: string; label: string; detail?: string }[]>()
     .notNull(),
   selectedOptionId: text("selected_option_id"),
+  userId: text("user_id"),
+  send: jsonb("send_params").$type<NonNullable<ChoiceIsland["send"]>>(),
+  previewTurn: integer("preview_turn"),
+  expiresAt: text("expires_at"),
+  closedAt: text("closed_at"),
   createdAt: text("created_at").notNull().$defaultFn(now),
 });
 

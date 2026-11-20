@@ -12,9 +12,10 @@ export interface SiriOrbProps {
   className?: string;
   colors?: { bg?: string; c1?: string; c2?: string; c3?: string };
   size?: string;
+  style?: React.CSSProperties;
 }
 
-export const SiriOrb: React.FC<SiriOrbProps> = ({ size = "192px", className, colors, animationDuration = 20 }) => {
+export const SiriOrb: React.FC<SiriOrbProps> = ({ size = "192px", className, colors, animationDuration = 20, style }) => {
   const finalColors = {
     bg: "oklch(95% 0.02 264.695)",
     c1: "oklch(75% 0.15 350)",
@@ -48,6 +49,7 @@ export const SiriOrb: React.FC<SiriOrbProps> = ({ size = "192px", className, col
           "--dot-size": `${dotSize}px`,
           "--shadow-spread": `${shadowSpread}px`,
           "--mask-radius": maskRadius,
+          ...style,
         } as React.CSSProperties
       }
     >

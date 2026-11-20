@@ -1,7 +1,7 @@
 import type { HarnessCtx, Harness, ToolDef } from "@arcie/harness";
 import type { ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
 import { z } from "zod";
-import { SYSTEM_PROMPT } from "./prompt.js";
+import { SYSTEM_PROMPT, TEXT_SYSTEM_PROMPT } from "./prompt.js";
 
 const MAX_TOOL_CALLS = 6;
 const TIMEOUT_MS = 15_000;
@@ -46,11 +46,13 @@ export async function* runAgentTurn(
   signal?: AbortSignal,
 ): AsyncGenerator<string> {
   const messages: ChatCompletionMessageParam[] = [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: ctx.channel === "voice" ? SYSTEM_PROMPT : TEXT_SYSTEM_PROMPT },
     ...incoming.filter((m) => m.role !== "system" && m.role !== "developer"),
   ];
   const tools = toOpenAITools(deps.harness.tools);
+  const proposalTools = new Set(deps.harness.tools.filter((tool) => tool.kind === "propose").map((tool) => tool.name));
   let toolCalls = 0;
+  let hasReview = false;
 
   while (true) {
     if (signal?.aborted) return;
@@ -107,6 +109,10 @@ export async function* runAgentTurn(
         continue;
       }
       toolCalls++;
+      if (ctx.channel === "voice" && hasReview && (proposalTools.has(c.name) || c.name === "choose_contact")) {
+        messages.push({ role: "tool", tool_call_id: c.id, content: JSON.stringify({ summary: "A review or recipient choice is already on screen. Finish that one first." }) });
+        continue;
+      }
       let args: unknown = {};
       try {
         args = c.args ? JSON.parse(c.args) : {};
@@ -114,6 +120,7 @@ export async function* runAgentTurn(
         args = {};
       }
       const r = await deps.harness.runTool(signal ? { ...ctx, signal } : ctx, c.name, args);
+      hasReview ||= r.island?.kind === "confirm" || r.island?.kind === "choice";
       messages.push({ role: "tool", tool_call_id: c.id, content: JSON.stringify({ summary: r.summary, data: r.data }) });
     }
   }

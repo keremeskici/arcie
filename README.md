@@ -10,8 +10,8 @@
 | "How do I get paid?" | Shows your address on screen (never read aloud) | Circle Wallets |
 | "Send 5 dollars to Bob" | Confirm card → send on Arc | App Kit `send` |
 | "Swap 10 dollars to euros" | Quote, slippage cap, confirm card → swap | App Kit `swap` |
-| "Invest 20 dollars" | Best-APY vault, variable-APY warning, confirm → deposit | App Kit `earn` |
-| "Take it out" | Withdraw from the vault | App Kit `earn` |
+| "Put 20 dollars in savings" | Review the amount and variable annual rate, then confirm the deposit | App Kit `earn` |
+| "Take it out of savings" | Review a full or partial withdrawal to your wallet | App Kit `earn` |
 | "Add 50 dollars" | Circle's hosted buy widget (card / Apple Pay / bank) | App Kit `onramp` |
 
 Every user gets their own **Circle developer-controlled wallet** on Arc Testnet, created at first login (Google / Apple / email via **Privy**). USDC is the gas token, so there's nothing else to fund.
@@ -36,6 +36,7 @@ packages/core      shared types, money math (bigint, no floats), error codes, is
 packages/db        Postgres + Drizzle schema, migrations, demo seed
 packages/appkit    Circle App Kit wrapper (send/swap/earn/onramp), chain registry, wallet provisioning
 packages/harness   tools, intents state machine, policy, disclosure (confirm/receipt), audit, events
+apps/web           React wallet, Circle checkout, text and voice conversations
 apps/server        Hono server: OpenAI-compatible /v1/chat/completions (ElevenLabs custom LLM), REST, SSE, Privy auth
 docs/              architecture, ElevenLabs and Privy setup
 .claude/           design spec, implementation plan, NEXT.md (what to do next)
@@ -68,10 +69,11 @@ Create the wallet set and the demo wallets. With `--fund`, it also sends that mu
 pnpm provision --fund 10
 ```
 
-Start the server on http://localhost:8787:
+Start the API and the React wallet in separate terminals. Open [the wallet](http://localhost:5173).
 
 ```bash
-pnpm dev
+pnpm dev   # API on port 8787
+pnpm web   # Wallet on port 5173
 ```
 
 Talk to the agent from the terminal (in a second terminal):
@@ -104,6 +106,8 @@ Onramp sandbox: open **Add Money → Open checkout**, or say **“I want to depo
 
 ## Status
 
-- **Arc Testnet:** the original backend smoke run passed 15/15, evals passed 22/22, and the backend review covered 206 passing tests. Balance, send, and a voice confirmation were verified with a real Arc transaction.
-- **Vercel and Supabase branch:** 417 tests across 40 suites and both typechecks pass. See the [deployment runbook](docs/deployment.md) for hosted verification and cutover, and [NEXT.md](.claude/NEXT.md) for project history.
-- **Possible later feature:** ENS text-record agent limits.
+The React wallet supports send, receive, swaps, savings deposits and withdrawals, Circle checkout, contacts, activity, account limits, and typed and voice conversations. The Swap screen refreshes its estimate while you type. Tapping Swap approves the minimum shown and submits the trade using the platform’s price protection. Sends, savings transfers and voice-initiated swaps have a separate review before execution.
+
+The November 20 verification includes real Arc Testnet receipts, provider-specific test limits, and the route-to-UI inventory. [Implementation plan and verification](docs/superpowers/plans/2026-11-20-backend-ui-coverage.md)
+
+See the [deployment runbook](docs/deployment.md) for hosted verification and the [project handoff](.claude/NEXT.md) for project history.

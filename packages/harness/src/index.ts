@@ -7,3 +7,6 @@ export * from "./policy/provider.js";
 export * from "./policy/db-provider.js";
 export type { ToolDef, ToolResult } from "./tools/registry.js";
 export { buildReceipt } from "./disclosure/receipt.js";
+export { savedReview } from "./disclosure/savings.js";
+export { quoteSendMax } from "./actions.js";
+export { readWalletBalances } from "./balances.js";

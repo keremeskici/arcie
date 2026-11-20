@@ -38,6 +38,7 @@ const schema = z.object({
   WELCOME_DRIP_USDC: optional,
   LLM_SHARED_SECRET: optional,
   ELEVENLABS_AGENT_ID: optional,
+  COINGECKO_API_KEY: optional,
 }).superRefine((e, ctx) => {
   if ((e.ONRAMP_ENVIRONMENT === "sandbox" && e.ONRAMP_API_KEY.startsWith("LIVE_API_KEY:")) ||
       (e.ONRAMP_ENVIRONMENT === "production" && e.ONRAMP_API_KEY.startsWith("TEST_API_KEY:"))) {

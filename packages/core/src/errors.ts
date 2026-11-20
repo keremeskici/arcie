@@ -20,7 +20,7 @@ const MESSAGES: Record<ErrorCode, { withVars?: string; plain: string }> = {
   },
   SLIPPAGE_EXCEEDED: { plain: "The price moved too much, so nothing was swapped. Want a fresh quote?" },
   QUOTE_EXPIRED: { plain: "That quote expired. Want me to get a fresh one?" },
-  VAULT_UNAVAILABLE: { plain: "That earning vault isn't available right now." },
+  VAULT_UNAVAILABLE: { plain: "Savings is unavailable right now." },
   POLICY_DENIED: { plain: "That's outside the limits you've set, so I can't do it." },
   INVALID_RECIPIENT: { plain: "I couldn't find who to send that to." },
   INVALID_AMOUNT: { plain: "I didn't catch the amount. Say it as a number, like 5 or 5.50." },

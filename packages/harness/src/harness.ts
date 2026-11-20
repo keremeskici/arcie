@@ -1,46 +1,55 @@
-import type { AppKitPort } from "@arcie/appkit";
-import { ArcieError, type ActionKind, type Channel, type IslandPayload, type TokenSymbol, tokenName } from "@arcie/core";
-import { choices, type Db, type DbOrTx, type Tx } from "@arcie/db";
+import type { WalletRef } from "@arcie/appkit";
+import { ArcieError, type ActionKind, type Channel, type ChoiceIsland, type IslandPayload, type TokenSymbol, tokenName } from "@arcie/core";
+import { choices, type DbOrTx, type Tx } from "@arcie/db";
 import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { parseUnits } from "viem";
-import { ACTIONS, swapIsland } from "./actions.js";
+import { ACTIONS, swapIsland, type SwapArgs } from "./actions.js";
 import { audit } from "./audit.js";
+import { activeContactChoice, closeContactChoice, contactChoiceIsland, matchContactChoice, noContactChoice } from "./contact-choices.js";
 import type { HarnessCtx } from "./context.js";
-import { beginProposal, cancelUnderLock, claimConfirmation, claimExecution, finishProposal, guardSession, lockConfirmRows, publishProposal, releaseConfirmation } from "./coordination.js";
+import { beginProposal, cancelUnderLock, claimConfirmation, claimExecution, finishProposal, guardSession, invalidateProposals, lockConfirmRows, lockSessionState, publishProposal, releaseConfirmation } from "./coordination.js";
+import { CONFIRM_INSTRUCTION } from "./disclosure/prompt.js";
 import { buildReceipt, nextStepFor } from "./disclosure/receipt.js";
-import { StepTracker, type EventLog } from "./events.js";
+import { StepTracker } from "./events.js";
 import { paramsHash } from "./intents/hash.js";
 import { assertConfirmable } from "./intents/machine.js";
-import { IntentRepo, QUOTE_FRESH_MS, savedCard, type Intent, type IntentStatus } from "./intents/repo.js";
-import type { PolicyProvider } from "./policy/provider.js";
+import { IntentRepo, QUOTE_FRESH_MS, savedCard, savedProcessing, type Intent, type IntentStatus } from "./intents/repo.js";
 import { checkLimits } from "./policy/check.js";
+import { screenSwap, type ScreenSwapRequest, type ScreenSwapResult } from "./screen-swap.js";
 import { balancesOf, countWord, joinNames, walletFor, type Svc } from "./services.js";
 import { controlTools } from "./tools/control.js";
 import { onrampTools, recordOnrampEvent } from "./tools/onramp.js";
-import { proposeTools } from "./tools/propose.js";
-import { readTools } from "./tools/read.js";
+import { legacyEarnArgs, proposeTools } from "./tools/propose.js";
+import { readSwapQuote, readTools } from "./tools/read.js";
 import type { ToolDef, ToolResult } from "./tools/registry.js";
 
 const TTL_SEC = 120;
 type Claim = { token: string; revision: number };
 const STALE_CONSENT = "The details changed. Please check the new card and confirm again.";
 const SCREEN_ONLY = "Tap confirm on the card to finish.";
+const reviewSummary = (spokenPrompt: string, tapOnly: boolean) =>
+  tapOnly ? spokenPrompt.slice(0, -CONFIRM_INSTRUCTION.length) + SCREEN_ONLY : spokenPrompt;
 
 export type ConfirmResult = { status: IntentStatus; summary: string; island?: IslandPayload };
 
 export interface Harness {
   tools: ToolDef<any>[];
   intents: IntentRepo;
+  quoteSwap(ctx: HarnessCtx, params: SwapArgs): ReturnType<typeof readSwapQuote>;
+  screenSwap(ctx: HarnessCtx, request: ScreenSwapRequest): Promise<ScreenSwapResult>;
   runTool(ctx: HarnessCtx, name: string, rawArgs: unknown): Promise<ToolResult>;
   propose(ctx: HarnessCtx, kind: ActionKind, params: unknown): Promise<ToolResult>;
   confirm(ctx: HarnessCtx, intentId: string | undefined, channel: Channel, revision?: number): Promise<ConfirmResult>;
   cancel(ctx: HarnessCtx, intentId?: string): Promise<ToolResult>;
+  pendingChoice(sessionId: string, now: Date): Promise<ChoiceIsland | null>;
   answerChoice(ctx: HarnessCtx, choiceId: string, optionId: string): Promise<void>;
+  prepareChoice(ctx: HarnessCtx, choiceId: string, optionId: string): Promise<ToolResult>;
+  dismissChoice(ctx: HarnessCtx, choiceId: string): Promise<void>;
   recordOnrampEvent(ctx: HarnessCtx, e: { type: "submitted" | "settled" | "failed"; payload: unknown }): Promise<void>;
 }
 
-export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyProvider; events: EventLog; confirmChannels?: "any" | "screen" }): Harness {
+export function createHarness(deps: Omit<Svc, "repo" | "confirmChannels"> & { confirmChannels?: "any" | "screen" }): Harness {
   const svc: Svc = { ...deps, repo: new IntentRepo(deps.db), confirmChannels: deps.confirmChannels ?? "any" };
   const { repo, events, db } = svc;
   const trackers = new Map<string, StepTracker>();
@@ -52,6 +61,7 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
   const guarded = async <T>(tx: Tx, ctx: HarnessCtx, fn: () => Promise<T>) => {
     const result = await fn();
     await guardSession(tx, ctx);
+    assertActive(ctx);
     return result;
   };
 
@@ -88,7 +98,8 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
   async function storedResult(id: string): Promise<ConfirmResult> {
     const row = await repo.get(id);
     if (!row) throw new ArcieError("NOT_FOUND");
-    const island = (row.status === "awaiting_confirmation" ? savedCard(row) : row.preview?.receipt) as IslandPayload | undefined;
+    const island = (row.status === "awaiting_confirmation" ? savedCard(row)
+      : savedProcessing(row) ?? row.preview?.receipt) as IslandPayload | undefined;
     const summary = row.error?.message ?? (row.status === "succeeded" ? "Your transaction completed." :
       row.status === "executing" ? "Your transaction is processing." : `This request is ${row.status.replaceAll("_", " ")}.`);
     return { status: row.status, summary, ...(island ? { island } : {}) };
@@ -97,10 +108,12 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
   const dismiss = (tx: DbOrTx, ctx: HarnessCtx, intentId: string, reason: "cancelled" | "superseded" | "expired") =>
     events.append(tx, ctx.sessionId, { kind: "dismiss", intentId, reason });
 
-  async function propose(ctx: HarnessCtx, kind: ActionKind, params: unknown): Promise<ToolResult> {
+  async function propose(ctx: HarnessCtx, kind: ActionKind, params: unknown, selection?: { choiceId: string; optionId: string }): Promise<ToolResult> {
     assertActive(ctx);
-    // REST and model tools share these exact schemas, including their defaults.
-    const parsed = tools.find((t) => t.name === `propose_${kind}`)?.args.safeParse(params);
+    const schema = kind === "earn_deposit" || kind === "earn_withdraw"
+      ? legacyEarnArgs[kind]
+      : tools.find((t) => t.name === `propose_${kind}`)?.args;
+    const parsed = schema?.safeParse(params);
     if (!parsed?.success) return { summary: "I didn't quite catch that. Could you check the action details?", data: { error: "INVALID_ARGS" } };
     const generation = await db.transaction((tx) => guarded(tx, ctx, () => beginProposal(tx, ctx.sessionId)));
     const replaced: ToolResult = { summary: "That preparation was cancelled or replaced.", data: { cancelled: true } };
@@ -108,53 +121,54 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
       const w = await walletFor(svc, ctx);
       const prep = await ACTIONS[kind].prepare(svc, ctx, w, parsed.data as never);
       assertActive(ctx);
-      const now = ctx.now();
-
-      if (prep.type === "choice") {
-        const id = randomUUID();
-        const island: IslandPayload = { kind: "choice", choiceId: id, question: prep.question, options: prep.options };
-        const written = await publishProposal(db, ctx.sessionId, generation, async (tx) => {
-          await tx.insert(choices).values({ id, sessionId: ctx.sessionId, question: prep.question, options: prep.options, createdAt: now.toISOString() });
-          await events.append(tx, ctx.sessionId, island);
-          await guardSession(tx, ctx);
-          return true;
-        });
-        if (!written) return replaced;
-        const names = prep.options.map((o) => o.label);
-        return { summary: `I found ${countWord(names.length)} contacts: ${joinNames(names)}. Which one?`, data: { choiceId: id, options: prep.options }, island };
-      }
-
-      const base = { sessionId: ctx.sessionId, userId: ctx.userId, kind, chain: w.chain, usdValue: String(prep.usdValue), previewTurn: ctx.userTurn, now, ttlSec: TTL_SEC };
-      if (prep.type === "rejected") {
-        const rejected = await publishProposal(db, ctx.sessionId, generation, async (tx) => {
-          const i = await new IntentRepo(tx).create({ ...base, params: prep.params, preview: {}, status: "rejected", statusReason: prep.reason });
-          await audit(tx, ctx, "intent.rejected", { kind, code: prep.code, reason: prep.reason }, i.id);
-          await guardSession(tx, ctx);
-          return i;
-        });
-        if (!rejected) return replaced;
-        return { summary: prep.reason, data: { error: prep.code, intentId: rejected.id } };
-      }
-
-      // Supersede the session's older card first: the database allows only one awaiting intent per session.
-      const published = await publishProposal(db, ctx.sessionId, generation, async (tx) => {
-        const txRepo = new IntentRepo(tx);
-        const id = randomUUID();
-        const superseded = await txRepo.supersedeOpen(ctx.sessionId, id);
-        const created = await txRepo.create({ ...base, id, params: { ...prep.params, requireScreen: prep.requireScreen }, preview: prep.preview, status: "awaiting_confirmation" });
-        const island = { ...prep.buildIsland(created.id, created.expiresAt!), revision: created.revision + 1 };
+      const published = await publishProposal<ToolResult>(db, ctx.sessionId, generation, async (tx) => {
         const previewTurn = await guardSession(tx, ctx);
-        await txRepo.patch(created.id, { previewTurn, preview: { ...prep.preview, originalDisclosure: true, island, estimated: prep.estimated } });
+        assertActive(ctx);
+        const now = ctx.now();
+        const txRepo = new IntentRepo(tx);
+        const previous = await activeContactChoice(tx, ctx.sessionId, now, ctx.userId);
+        if (selection && previous?.id !== selection.choiceId) throw noContactChoice();
+        const base = { sessionId: ctx.sessionId, userId: ctx.userId, kind, chain: w.chain, previewTurn, now, ttlSec: TTL_SEC };
+
+        if (prep.type === "rejected") {
+          const rejected = await txRepo.create({ ...base, usdValue: String(prep.usdValue), params: prep.params, preview: {}, status: "rejected", statusReason: prep.reason });
+          await audit(tx, ctx, "intent.rejected", { kind, code: prep.code, reason: prep.reason }, rejected.id);
+          return { summary: prep.reason, data: { error: prep.code, intentId: rejected.id } };
+        }
+
+        if (previous) {
+          const closed = await closeContactChoice(tx, events, ctx, previous.id, selection?.optionId);
+          if (selection && !closed) throw noContactChoice();
+        }
+        if (prep.type === "choice") {
+          const id = randomUUID();
+          for (const old of await txRepo.supersedeOpen(ctx.sessionId)) await dismiss(tx, ctx, old, "superseded");
+          const [choice] = await tx.insert(choices).values({
+            id, sessionId: ctx.sessionId, userId: ctx.userId, question: prep.question, options: prep.options,
+            send: prep.send, previewTurn, createdAt: now.toISOString(),
+            expiresAt: new Date(now.getTime() + TTL_SEC * 1000).toISOString(),
+          }).returning();
+          const island = contactChoiceIsland(choice!);
+          await events.append(tx, ctx.sessionId, island);
+          assertActive(ctx);
+          const names = prep.options.map((o) => o.label);
+          return { summary: `I found ${countWord(names.length)} contacts: ${joinNames(names)}. Which one?`, data: { choiceId: id, options: prep.options }, island };
+        }
+
+        // Supersede the older card before inserting: Postgres permits only one awaiting intent per session.
+        const id = randomUUID();
+        for (const old of await txRepo.supersedeOpen(ctx.sessionId, id)) await dismiss(tx, ctx, old, "superseded");
+        const created = await txRepo.create({ ...base, id, usdValue: String(prep.usdValue), params: { ...prep.params, requireScreen: prep.requireScreen }, preview: prep.preview, status: "awaiting_confirmation" });
+        const island = { ...prep.buildIsland(created.id, created.expiresAt!), revision: created.revision + 1 };
+        await txRepo.patch(created.id, { preview: { ...prep.preview, originalDisclosure: true, island, estimated: prep.estimated } });
+        if (selection) await audit(tx, ctx, "choice.answered", selection);
         await audit(tx, ctx, "intent.proposed", { kind, params: prep.params, usdValue: prep.usdValue }, created.id);
-        // The card and any dismissals commit with the proposal, in the order a stream should show them.
-        for (const old of superseded) await dismiss(tx, ctx, old, "superseded");
         await events.append(tx, ctx.sessionId, island);
-        return { intent: created, island, superseded };
+        assertActive(ctx);
+        const summary = reviewSummary(island.spokenPrompt, svc.confirmChannels === "screen" || prep.requireScreen);
+        return { summary, data: { intentId: created.id }, island };
       });
-      if (!published) return replaced;
-      const { intent, island } = published;
-      const summary = prep.requireScreen ? `${island.spokenPrompt} Because this is a new recipient, please tap confirm on the card.` : island.spokenPrompt;
-      return { summary, data: { intentId: intent.id }, island };
+      return published ?? replaced;
     } finally {
       await finishProposal(db, ctx.sessionId, generation);
     }
@@ -210,13 +224,17 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
     });
     // Cancelled, superseded, expired or revised while the provider answered: this consent is stale.
     if (!written) throw new ArcieError("POLICY_DENIED", { spoken: STALE_CONSENT });
-    return { status: "awaiting_confirmation", summary: island.spokenPrompt, island };
+    const summary = reviewSummary(island.spokenPrompt, svc.confirmChannels === "screen" || intent.params.requireScreen === true);
+    return { status: "awaiting_confirmation", summary: `The price changed. ${summary}`, island };
   }
 
   async function confirm(ctx: HarnessCtx, intentId: string | undefined, channel: Channel, revision?: number): Promise<ConfirmResult> {
     assertActive(ctx);
     const candidate = intentId ? await repo.get(intentId) : await repo.latestAwaiting(ctx.sessionId);
-    if (!candidate || candidate.userId !== ctx.userId || candidate.sessionId !== ctx.sessionId) throw new ArcieError("NOT_FOUND");
+    if (!candidate || candidate.userId !== ctx.userId || candidate.sessionId !== ctx.sessionId) {
+      const choice = !intentId && await activeContactChoice(db, ctx.sessionId, ctx.now(), ctx.userId);
+      throw new ArcieError("NOT_FOUND", { spoken: choice ? "Choose a recipient first." : "There's nothing waiting for your confirmation right now." });
+    }
     // The claim is shared through the database, so a second instance (or tab) can't act on this confirmation.
     const claim = await claimConfirmation(db, candidate.id);
     if (!claim) {
@@ -240,7 +258,11 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
       assertConfirmable(intent, { channel, userTurn: ctx.userTurn, now: started });
     } catch (e) {
       if (e instanceof ArcieError && e.code === "QUOTE_EXPIRED" && intent?.status === "awaiting_confirmation") {
-        await transitionWithEvent(ctx.sessionId, intent.id, "awaiting_confirmation", "expired", {}, { kind: "dismiss", intentId: intent.id, reason: "expired" });
+        await transitionWithEvent(ctx.sessionId, intent.id, "awaiting_confirmation", "expired", {},
+          { kind: "dismiss", intentId: intent.id, reason: "expired" }, async (tx) => {
+            await guardSession(tx, ctx);
+            assertActive(ctx);
+          }, { txHash: null, revision: intent.revision });
       }
       throw e;
     }
@@ -261,6 +283,7 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
 
     // The budget lock, fresh limits, usage and execution claim share one transaction. Executing
     // intents reserve their budget even when settlement is still unknown.
+    const w = await walletFor(svc, ctx, intent.chain);
     assertActive(ctx);
     const claimed = await db.transaction((tx) => claimExecution(tx, {
       intentId: intent.id, userId: ctx.userId, token: claim.token, revision: claim.revision,
@@ -278,6 +301,10 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
         });
         if (denied) throw new ArcieError(denied.code, { spoken: denied.reason });
       },
+      onClaim: async (tx) => {
+        await audit(tx, ctx, "intent.confirmed", { channel }, intent.id);
+        await events.append(tx, ctx.sessionId, { kind: "processing", intentId: intent.id });
+      },
     }));
     if (claimed === "stale_quote") {
       const current = await storedResult(intent.id);
@@ -285,9 +312,10 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
     }
     if (claimed === "screen_only") return { status: "awaiting_confirmation", summary: SCREEN_ONLY };
     if (!claimed) return storedResult(intent.id);
-    await audit(db, ctx, "intent.confirmed", { channel }, intent.id);
+    return executeClaimed(ctx, intent, w, started);
+  }
 
-    const w = await walletFor(svc, ctx, intent.chain);
+  async function executeClaimed(ctx: HarnessCtx, intent: Intent, w: WalletRef, started: Date): Promise<ConfirmResult> {
     const estimated = (intent.preview?.estimated ?? {}) as Record<string, string | null>;
     const elapsed = () => ctx.now().getTime() - started.getTime();
     const finishFailure = async (err: ArcieError, txHash: string | null, explorerUrl?: string): Promise<ConfirmResult> => {
@@ -305,12 +333,11 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
       const err = e instanceof ArcieError ? e : new ArcieError("UNKNOWN");
       if (!["UNKNOWN", "RPC_UNAVAILABLE", "CIRCLE_API_ERROR"].includes(err.code)) return finishFailure(err, null);
       const summary = "I couldn't verify that transaction. Please check your activity before trying again.";
-      await db.transaction(async (tx) => {
-        const won = await new IntentRepo(tx).transition(intent.id, "executing", "executing",
-          { statusReason: "submission_unknown", error: { code: err.code, message: summary } }, { txHash: null });
-        if (won) await audit(tx, ctx, "intent.uncertain", { code: err.code }, intent.id);
-      });
-      return storedResult(intent.id);
+      const island = { kind: "processing", intentId: intent.id, unverified: true, summary } as const;
+      const won = await transitionWithEvent(ctx.sessionId, intent.id, "executing", "executing",
+        { statusReason: "submission_unknown", error: { code: err.code, message: summary } },
+        island, (tx) => audit(tx, ctx, "intent.uncertain", { code: err.code }, intent.id), { txHash: null });
+      return won ? { status: "executing", summary, island } : storedResult(intent.id);
     }
 
     // Commit submission evidence before any further network read. Only settlement can replace unknown actuals.
@@ -332,12 +359,10 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
       return finishFailure(new ArcieError("UNKNOWN", { spoken: "That transaction failed onchain. Check your activity for details." }), txHash, ex.tx.explorerUrl);
     }
     if (ex.tx.status === "PENDING") {
-      await db.transaction(async (tx) => {
-        if (await new IntentRepo(tx).transition(intent.id, "executing", "executing", {}, { txHash })) {
-          await audit(tx, ctx, "intent.pending", { txHash }, intent.id);
-        }
-      });
-      return storedResult(intent.id);
+      const summary = "It's processing. I'll show the receipt when it lands.";
+      const won = await transitionWithEvent(ctx.sessionId, intent.id, "executing", "executing", {},
+        { kind: "processing", intentId: intent.id, summary }, (tx) => audit(tx, ctx, "intent.pending", { txHash }, intent.id), { txHash });
+      return won ? { status: "executing", summary } : storedResult(intent.id);
     }
     const balances = await balancesOf(svc, w).catch(() => null);
     const nextStep = nextStepFor(intent.kind, intent.params as { tokenOut?: string });
@@ -353,40 +378,85 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
   }
 
   async function cancel(ctx: HarnessCtx, intentId?: string): Promise<ToolResult> {
+    assertActive(ctx);
     if (intentId) {
       const named = await repo.get(intentId);
       if (!named || named.userId !== ctx.userId || named.sessionId !== ctx.sessionId) throw new ArcieError("NOT_FOUND");
     }
     // Bump the generation and cancel the card under one session lock, so a concurrent publish can't slip a card in between.
-    const { stopped, cancelledId } = await cancelUnderLock(db, ctx.sessionId, (tx, preparing) => guarded(tx, ctx, async () => {
+    return cancelUnderLock(db, ctx.sessionId, (tx, preparing) => guarded(tx, ctx, async () => {
       const txRepo = new IntentRepo(tx);
+      const choice = !intentId && await activeContactChoice(tx, ctx.sessionId, ctx.now(), ctx.userId);
+      if (choice && await closeContactChoice(tx, events, ctx, choice.id)) {
+        await audit(tx, ctx, "choice.cancelled", { choiceId: choice.id });
+        return { summary: "I cancelled the send. No money moved.", data: { cancelled: true, choiceId: choice.id } };
+      }
       const intent = intentId ? await txRepo.get(intentId) : await txRepo.latestAwaiting(ctx.sessionId);
       if (intent && intent.userId === ctx.userId && intent.status === "awaiting_confirmation"
         && await txRepo.transition(intent.id, "awaiting_confirmation", "cancelled", { statusReason: "user" })) {
         await audit(tx, ctx, "intent.cancelled", {}, intent.id);
         await dismiss(tx, ctx, intent.id, "cancelled");
-        return { stopped: preparing, cancelledId: intent.id };
+        return { summary: "Okay, I cancelled that. Nothing was moved.", data: { cancelled: true, intentId: intent.id } };
       }
-      return { stopped: preparing, cancelledId: null };
+      return { summary: preparing ? "Okay, I stopped preparing that. Nothing was moved." : "There's nothing to cancel.", data: { cancelled: preparing } };
     }));
-    if (!cancelledId) {
-      return { summary: stopped ? "Okay, I stopped preparing that. Nothing was moved." : "There's nothing to cancel.", data: { cancelled: stopped } };
-    }
-    return { summary: "Okay, I cancelled that. Nothing was moved.", data: { cancelled: true, intentId: cancelledId } };
   }
 
   async function answerChoice(ctx: HarnessCtx, choiceId: string, optionId: string): Promise<void> {
-    const c = (await db.select().from(choices).where(eq(choices.id, choiceId)).limit(1))[0];
-    if (!c || c.sessionId !== ctx.sessionId || !c.options.some((o) => o.id === optionId)) {
-      throw new ArcieError("NOT_FOUND", { spoken: "I couldn't find that option." });
-    }
+    assertActive(ctx);
     await db.transaction((tx) => guarded(tx, ctx, async () => {
-      await tx.update(choices).set({ selectedOptionId: optionId }).where(eq(choices.id, choiceId));
+      await lockSessionState(tx, ctx.sessionId);
+      const [choice] = await tx.select().from(choices).where(eq(choices.id, choiceId)).limit(1);
+      if (!choice || choice.sessionId !== ctx.sessionId || (choice.userId !== null && choice.userId !== ctx.userId)
+          || !choice.options.some((o) => o.id === optionId)) {
+        throw new ArcieError("NOT_FOUND", { spoken: "I couldn't find that option." });
+      }
+      if (choice.selectedOptionId === optionId) return;
+      if (choice.userId !== null) {
+        const active = await activeContactChoice(tx, ctx.sessionId, ctx.now(), ctx.userId);
+        if (active?.id !== choiceId || !await closeContactChoice(tx, events, ctx, choiceId, optionId)) throw noContactChoice();
+      } else {
+        await tx.update(choices).set({ selectedOptionId: optionId }).where(eq(choices.id, choiceId));
+      }
       await audit(tx, ctx, "choice.answered", { choiceId, optionId });
     }));
   }
 
-  const api = { propose, confirm, cancel };
+  async function dismissChoice(ctx: HarnessCtx, choiceId: string): Promise<void> {
+    assertActive(ctx);
+    await db.transaction((tx) => guarded(tx, ctx, async () => {
+      await lockSessionState(tx, ctx.sessionId);
+      if (await closeContactChoice(tx, events, ctx, choiceId)) {
+        await invalidateProposals(tx, ctx.sessionId);
+        await audit(tx, ctx, "choice.cancelled", { choiceId });
+      }
+    }));
+  }
+
+  async function prepareChoice(ctx: HarnessCtx, choiceId: string, optionId: string): Promise<ToolResult> {
+    assertActive(ctx);
+    const choice = await activeContactChoice(db, ctx.sessionId, ctx.now(), ctx.userId);
+    if (!choice?.send || choice.id !== choiceId || !choice.options.some((o) => o.id === optionId)) throw noContactChoice();
+    if (ctx.channel !== "screen" && choice.previewTurn !== null && ctx.userTurn <= choice.previewTurn) {
+      throw new ArcieError("POLICY_DENIED", { spoken: "Choose a recipient after seeing or hearing the options." });
+    }
+    return propose(ctx, "send", { ...choice.send, to: optionId }, { choiceId, optionId });
+  }
+
+  async function chooseContact(ctx: HarnessCtx, selection: string): Promise<ToolResult> {
+    const choice = await activeContactChoice(db, ctx.sessionId, ctx.now(), ctx.userId);
+    if (!choice) throw noContactChoice();
+    const option = matchContactChoice(choice.options, selection);
+    if (!option) {
+      const summary = choice.options.length <= 2
+        ? `Choose ${choice.options.map((o) => o.label).join(" or ")}.`
+        : "Say a name or choose one of the contacts on screen.";
+      return { summary, data: { needsChoice: true }, island: contactChoiceIsland(choice) };
+    }
+    return prepareChoice(ctx, choice.id, option.id);
+  }
+
+  const api = { propose, confirm, cancel, chooseContact };
   const tools: ToolDef<any>[] = [...readTools(svc), ...proposeTools(api), ...controlTools(api), ...onrampTools(svc)];
 
   async function runTool(ctx: HarnessCtx, name: string, rawArgs: unknown): Promise<ToolResult> {
@@ -415,11 +485,21 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
   return {
     tools,
     intents: repo,
+    quoteSwap: (ctx, args) => readSwapQuote(svc, ctx, args),
+    screenSwap: (ctx, request) => screenSwap(svc, ctx, request, executeClaimed),
     runTool,
     ...api,
+    pendingChoice: async (sessionId, now) => {
+      const choice = await activeContactChoice(db, sessionId, now);
+      return choice ? contactChoiceIsland(choice) : null;
+    },
     answerChoice,
+    prepareChoice,
+    dismissChoice,
     recordOnrampEvent: (ctx, e) => recordOnrampEvent(svc, ctx, e, (type, payload) => audit(db, ctx, type, payload)),
   };
 }
 
-export type HarnessApi = Pick<Harness, "propose" | "confirm" | "cancel">;
+export type HarnessApi = Pick<Harness, "propose" | "confirm" | "cancel"> & {
+  chooseContact(ctx: HarnessCtx, selection: string): Promise<ToolResult>;
+};

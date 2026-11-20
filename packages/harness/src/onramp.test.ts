@@ -51,6 +51,19 @@ describe("start_onramp", () => {
     const { h, ctx } = await setup();
     expect((await h.runTool(ctx, "start_onramp", { amount: "fifty" })).data).toMatchObject({ error: "INVALID_AMOUNT" });
   });
+
+  it("keeps a checkout from taking over the screen after the voice turn is interrupted", async () => {
+    const { h, ctx, kit, islands } = await setup();
+    const controller = new AbortController();
+    const mint = kit.createOnrampSession.bind(kit);
+    kit.createOnrampSession = async (params) => {
+      const result = await mint(params);
+      controller.abort();
+      return result;
+    };
+    await h.runTool({ ...ctx, signal: controller.signal }, "start_onramp", {});
+    expect((await islands()).some((island) => island.kind === "onramp")).toBe(false);
+  });
 });
 
 describe("recordOnrampEvent", () => {

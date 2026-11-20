@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { testApp } from "../testkit.js";
+import { DEMO_WALLET, testApp } from "../testkit.js";
 
 const S = { "x-arcie-session": "s1" };
 
@@ -23,6 +23,41 @@ describe("REST API", () => {
       { token: "cirBTC", amount: "0", usd: 0 },
     ]);
     expect(body.totalUsd).toBe(121.74);
+  });
+
+  const coingecko = { USDC: 0.9998, EURC: 1.08, cirBTC: 67000 } as const;
+
+  it("GET /balances prices every token from CoinGecko when a key is configured", async () => {
+    const { call, kit, harness } = await testApp({ tokenUsdPrice: async (t) => coingecko[t] });
+    kit.setBalance(DEMO_WALLET, "cirBTC", "0.01");
+    const body = await (await call("GET", "/balances")).json();
+    expect(body.chains[0].tokens).toEqual([
+      { token: "USDC", amount: "100", usd: 99.98, usdPrice: 0.9998 },
+      { token: "EURC", amount: "20", usd: 21.6, usdPrice: 1.08 },
+      { token: "cirBTC", amount: "0.01", usd: 670, usdPrice: 67000 },
+    ]);
+    expect(body.totalUsd).toBe(791.58);
+    const voice = await harness.runTool({ userId: "demo", sessionId: "voice", channel: "voice", userTurn: 1, now: () => new Date(), runId: "balance" }, "get_balances", {});
+    expect(voice).toEqual({ summary: "Your wallet balance is $791.58.", data: { totalUsd: body.totalUsd } });
+  });
+
+  it("GET /balances shows a price even with a zero balance", async () => {
+    const { call } = await testApp({ tokenUsdPrice: async (t) => coingecko[t] });
+    expect((await (await call("GET", "/balances")).json()).chains[0].tokens[2]).toEqual({ token: "cirBTC", amount: "0", usd: 0, usdPrice: 67000 });
+  });
+
+  it("GET /balances falls back to App Kit when CoinGecko has no price, and never invents one", async () => {
+    const { call, kit } = await testApp({ tokenUsdPrice: async (t) => (t === "USDC" ? 0.9998 : null) });
+    kit.setUsdRate("cirBTC", Number.NaN); // App Kit has no BTC price either
+    kit.setBalance(DEMO_WALLET, "cirBTC", "0.01");
+    const body = await (await call("GET", "/balances")).json();
+    expect(body.chains[0].tokens).toEqual([
+      { token: "USDC", amount: "100", usd: 99.98, usdPrice: 0.9998 },
+      { token: "EURC", amount: "20", usd: 21.74, usdPrice: 1.087 },
+      { token: "cirBTC", amount: "0.01", usd: null, usdPrice: null },
+    ]);
+    expect(body.totalUsd).toBeNull();
+    expect(body.knownSubtotalUsd).toBe(121.72);
   });
 
   it("proposes from a button, confirms by tap, and refuses a second confirm with 409", async () => {
@@ -135,6 +170,16 @@ describe("REST API", () => {
     expect(await harness.intents.listForUser("demo", 10)).toHaveLength(0);
   });
 
+  it("prices a custom slippage limit and rejects a limit looser than the wallet allows", async () => {
+    const { call, harness } = await testApp();
+    const quote = (maxSlippageBps: number) =>
+      call("POST", "/quotes/swap", { tokenIn: "USDC", tokenOut: "EURC", amountIn: "10", maxSlippageBps }, S);
+    expect(await (await quote(50)).json()).toMatchObject({ data: { estimatedOut: "9.2", minOut: "9.154", slippageBps: 50 } });
+    expect(await (await quote(0)).json()).toMatchObject({ data: { minOut: "9.2", slippageBps: 0 } });
+    expect((await quote(101)).status).toBe(400);
+    expect(await harness.intents.listForUser("demo", 1)).toHaveLength(0);
+  });
+
   it("POST /receive publishes a receive island for the user's wallet", async () => {
     const { call } = await testApp();
     const r = await call("POST", "/receive", {}, S);
@@ -147,14 +192,16 @@ describe("REST API", () => {
     });
   });
 
-  it("POST /chat runs an agent turn for the authenticated user without exposing LLM_SHARED_SECRET", async () => {
+  it.each(["dev", "privy"] as const)("POST /chat runs an agent turn in %s without exposing LLM_SHARED_SECRET", async (authMode) => {
     const { call } = await testApp({
+      authMode,
       llmSecret: "super-secret-llm-key",
       agent: async function* (ctx, msgs) {
         yield `hi ${ctx.userId}: ${String(msgs.at(-1)?.content ?? "")}`;
       },
     });
-    const r = await call("POST", "/chat", { messages: [{ role: "user", content: "balance?" }] }, S);
+    const headers = authMode === "privy" ? { authorization: "Bearer tok-demo" } : S;
+    const r = await call("POST", "/chat", { messages: [{ role: "user", content: "balance?" }] }, headers);
     expect(r.status).toBe(200);
     const body = await r.json();
     expect(body.reply).toBe("hi demo: balance?");
@@ -191,7 +238,7 @@ describe("shared proposal validation (F7)", () => {
 
   it.each([
     { kind: "send", params: { to: "Bob", amount: "5" }, title: "Send 5 USD to Bob?" },
-    { kind: "earn_deposit", params: { amount: "5" }, title: "Put 5 USD into Fake High Yield USDC?" },
+    { kind: "earn_deposit", params: { amount: "5" }, title: "Add 5 USD to savings?" },
   ])("applies the same defaults for $kind through REST", async ({ title, ...body }) => {
     const { call } = await testApp();
     const result = await call("POST", "/intents", body, S);

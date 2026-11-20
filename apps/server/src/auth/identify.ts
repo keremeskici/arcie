@@ -44,22 +44,36 @@ export async function mintVoiceSession(db: DbOrTx, userId: string, expiresBy = I
 }
 
 /** The user behind a minted voice session, or null if unknown, never minted, or expired. */
-export async function resolveVoiceSession(db: DbOrTx, sessionId: string | undefined, now = new Date()): Promise<{ userId: string } | null> {
+export async function resolveVoiceSession(db: DbOrTx, sessionId: string | undefined, now = new Date()) {
   if (!sessionId) return null;
   const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1);
   if (!row?.expiresAt || row.expiresAt <= now.toISOString()) return null;
-  return { userId: row.userId };
+  return row;
 }
 
 /** One model invocation owns each strictly newer message count. Retries keep their original count. */
-export async function admitTurn(db: DbOrTx, sessionId: string, userId: string, channel: Channel, incoming: number): Promise<boolean> {
+export async function admitTurn(
+  db: DbOrTx, sessionId: string, userId: string, channel: Channel, incoming: number,
+  options?: { existing: boolean; conversationId?: string | null },
+): Promise<boolean> {
   if (incoming < 1) return false;
+  const eligible = and(
+    eq(sessions.userId, userId), lt(sessions.userTurn, incoming),
+    sql`(${sessions.expiresAt} is null or ${sessions.expiresAt}::timestamptz > clock_timestamp())`,
+    options?.conversationId !== undefined
+      ? sql`${sessions.conversationId} is not distinct from ${options.conversationId}`
+      : undefined,
+  );
+  if (options?.existing) {
+    const rows = await db.update(sessions).set({ userTurn: incoming })
+      .where(and(eq(sessions.id, sessionId), eligible)).returning({ turn: sessions.userTurn });
+    return rows.length === 1;
+  }
   const rows = await db.insert(sessions).values({ id: sessionId, userId, channel, userTurn: incoming })
     .onConflictDoUpdate({
       target: sessions.id,
       set: { userTurn: incoming },
-      setWhere: and(eq(sessions.userId, userId), lt(sessions.userTurn, incoming),
-        sql`(${sessions.expiresAt} is null or ${sessions.expiresAt}::timestamptz > clock_timestamp())`),
+      setWhere: eligible,
     }).returning({ turn: sessions.userTurn });
   return rows.length === 1;
 }

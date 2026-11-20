@@ -1,130 +1,186 @@
-import type { IslandPayload } from "@arcie/core";
+import type { IslandPayload, TokenSymbol } from "@arcie/core";
+import { IconAddressBook, IconArrowLeft, IconCheck, IconLoader2 } from "@tabler/icons-react";
 import * as React from "react";
 import { Button } from "@/components/Button";
 import { Drawer, DrawerContent } from "@/components/ui/drawer";
 import { api, type Contact } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { isAddress, shortAddress } from "@/lib/format";
+import { isAddress } from "@/lib/format";
 import { useIslands } from "@/lib/islands";
-import { TokenIcon, tokenLabel } from "@/lib/tokens";
+import { enteredAmount, TokenIcon, tokenLabel, walletCurrencies } from "@/lib/tokens";
+import { SheetFeedback, useSheetData } from "./AccountSheetParts";
 
-const TOKENS = ["USDC", "EURC"] as const;
-
-/**
- * Tap-to-send. This only *proposes*: the server answers with the same confirm card the voice agent
- * produces, and nothing moves until the user confirms it (spec §8.3, §11 POST /intents).
- */
 export function SendSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
   const { push } = useIslands();
   const [to, setTo] = React.useState("");
+  const [contact, setContact] = React.useState<Contact | null>(null);
+  const [picking, setPicking] = React.useState(false);
   const [amount, setAmount] = React.useState("");
-  const [token, setToken] = React.useState<(typeof TOKENS)[number]>("USDC");
-  const [contacts, setContacts] = React.useState<Contact[]>([]);
+  const [sendAll, setSendAll] = React.useState(false);
+  const [maximum, setMaximum] = React.useState<{ recipient: string; token: TokenSymbol; amount: string; feeChecked: boolean; error?: string } | null>(null);
+  const [quoteAttempt, setQuoteAttempt] = React.useState(0);
+  const [token, setToken] = React.useState<TokenSymbol>("USDC");
   const [busy, setBusy] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
+  const [error, setError] = React.useState("");
+  const submitting = React.useRef(false);
+  const chooseButton = React.useRef<HTMLButtonElement>(null);
+  const recipient = contact?.id ?? to.trim();
+  const quote = sendAll && maximum?.recipient === recipient && maximum.token === token ? maximum : null;
+  const quoting = sendAll && !quote;
+  const displayed = sendAll ? quote?.amount ?? "" : amount;
+  const validAmount = enteredAmount(displayed, token);
+  const canSubmit = !!recipient && validAmount !== null && (!sendAll || quote?.feeChecked) && !busy;
 
   React.useEffect(() => {
-    if (!open) return;
-    setError(null);
-    api.get<{ contacts: Contact[] }>("/contacts").then((r) => setContacts(r.contacts), () => setContacts([]));
-  }, [open]);
+    if (!sendAll || !open) return;
+    let current = true;
+    async function refresh() {
+      const query = new URLSearchParams({ token });
+      if (recipient) query.set("to", recipient);
+      try {
+        const result = await api.get<{ amount: string; feeChecked: boolean }>(`/quotes/send-max?${query}`);
+        if (current) setMaximum({ recipient, token, ...result });
+      } catch (e) {
+        if (current) setMaximum({ recipient, token, amount: "", feeChecked: false,
+          error: e instanceof Error ? e.message : "Couldn't calculate the maximum." });
+      }
+    }
+    // A typed contact name can take multiple keystrokes. A selection already has an exact ID.
+    const timer = window.setTimeout(refresh, recipient && !contact ? 180 : 0);
+    return () => { current = false; window.clearTimeout(timer); };
+  }, [contact, open, quoteAttempt, recipient, sendAll, token]);
 
-  const validAmount = /^\d*\.?\d+$/.test(amount) && Number(amount) > 0;
-  const recipient = to.trim();
-  const canSubmit = recipient.length > 0 && validAmount && !busy;
-  const looksLikeAddress = recipient.startsWith("0x");
+  function exitMaximum() {
+    setMaximum(null);
+    setSendAll(false);
+    setError("");
+  }
+
+  function changeRecipient(value: string, selected: Contact | null) {
+    if ((selected?.id ?? value.trim()) !== recipient) setMaximum(null);
+    setError("");
+    setContact(selected);
+    setTo(value);
+  }
+
+  function close() {
+    if (submitting.current) return;
+    exitMaximum();
+    setPicking(false);
+    onOpenChange(false);
+  }
+
+  function returnFromPicker(selected?: Contact) {
+    if (selected && selected.id !== contact?.id) changeRecipient(selected.name, selected);
+    setPicking(false);
+    requestAnimationFrame(() => chooseButton.current?.focus());
+  }
+
+  function toggleMaximum() {
+    if (sendAll) { exitMaximum(); return; }
+    setError("");
+    setAmount("");
+    setMaximum(null);
+    setSendAll(true);
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!canSubmit) return;
-    if (looksLikeAddress && !isAddress(recipient)) return setError("That address doesn't look complete.");
+    if (!canSubmit || submitting.current) return;
+    if (recipient.startsWith("0x") && !isAddress(recipient)) return setError("That address doesn't look complete.");
+    submitting.current = true;
     setBusy(true);
-    setError(null);
+    setError("");
     try {
-      const r = await api.post<{ island?: IslandPayload }>("/intents", { kind: "send", params: { to: recipient, amount, token } });
-      if (r.island) push(r.island);
+      const r = await api.post<{ island?: IslandPayload }>("/intents", { kind: "send", params: { to: recipient, amount: sendAll ? "all" : validAmount, token } });
+      if (!r.island) throw new Error("Couldn't prepare that send. Please try again.");
+      push(r.island);
       onOpenChange(false);
       setTo("");
+      setContact(null);
       setAmount("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't prepare that send.");
+      setSendAll(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't prepare that send.");
     } finally {
+      submitting.current = false;
       setBusy(false);
     }
   }
 
   return (
-    <Drawer open={open} onOpenChange={onOpenChange}>
-      <DrawerContent title="Send" description="Send money to a wallet address or a contact.">
-        <form onSubmit={submit} className="flex flex-col gap-5">
-          <div className="flex flex-col items-center gap-3 py-2">
-            <div className="flex items-baseline gap-2">
-              <input
-                className="w-[7ch] bg-transparent text-center text-5xl font-semibold tabular-nums outline-none placeholder:text-white/20"
-                inputMode="decimal"
-                placeholder="0"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value.replace(",", ".").replace(/[^\d.]/g, ""))}
-                aria-label="Amount"
-              />
+    <Drawer open={open} onOpenChange={(next) => { if (!next) picking ? returnFromPicker() : close(); }}>
+      <DrawerContent title={picking ? "Choose contact" : "Send"} showClose={!busy}>
+        {picking ? <RecipientPicker selected={contact?.id} onBack={() => returnFromPicker()} onPick={returnFromPicker} /> : (
+          <form onSubmit={submit} className="flex flex-col gap-5">
+            <div className="flex flex-col items-center gap-3 py-2">
+              <input className="w-full bg-transparent text-center text-[clamp(1.8rem,9vw,3rem)] font-semibold tabular-nums outline-none placeholder:text-white/20"
+                inputMode="decimal" placeholder="0" value={displayed} disabled={busy} aria-label="Amount"
+                onChange={(e) => { exitMaximum(); setAmount(e.target.value); }} />
+              <button type="button" aria-pressed={sendAll} disabled={busy || quoting} aria-busy={quoting} onClick={toggleMaximum}
+                className="rounded-full bg-card-2 px-3.5 py-2 text-sm font-medium text-accent aria-pressed:bg-accent/15">
+                {quoting ? "Calculating…" : "Send all"}
+              </button>
+              {sendAll && quote && !quote.error && !recipient && (
+                <p className="text-center text-xs text-muted" role="status">
+                  {token === "USDC" ? "Balance before the network fee." : "Choose a recipient to check the network fee."}
+                </p>
+              )}
+              <div className="flex rounded-full bg-card-2 p-1">
+                {walletCurrencies.map((t) => (
+                  <button key={t} type="button" disabled={busy} aria-pressed={token === t}
+                    onClick={() => { if (token !== t) { setMaximum(null); setError(""); setToken(t); } }}
+                    className={cn("flex items-center gap-1.5 rounded-full py-1.5 pl-1.5 pr-4 text-sm font-medium", token === t ? "bg-white text-black" : "text-muted")}>
+                    <TokenIcon symbol={t} size={20} />{tokenLabel(t)}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="flex rounded-full bg-card-2 p-1">
-              {TOKENS.map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => setToken(t)}
-                  className={cn(
-                    "flex items-center gap-1.5 rounded-full py-1.5 pl-1.5 pr-4 text-sm font-medium",
-                    token === t ? "bg-white text-black" : "text-muted",
-                  )}
-                >
-                  <TokenIcon symbol={t} size={20} />
-                  {tokenLabel(t)}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor="send-recipient" className="text-sm text-muted">To</label>
+                <button ref={chooseButton} type="button" onClick={() => setPicking(true)} disabled={busy}
+                  className="flex min-h-10 items-center gap-1.5 px-1 text-sm font-medium text-accent">
+                  <IconAddressBook size={17} /> Contacts
                 </button>
-              ))}
+              </div>
+              <input id="send-recipient" className="h-14 w-full rounded-2xl border border-line bg-bg px-4 text-[15px] outline-none focus:border-accent"
+                placeholder="0x… or a contact name" autoCapitalize="off" autoCorrect="off" spellCheck={false} value={to} disabled={busy}
+                onChange={(e) => changeRecipient(e.target.value, null)} />
+              {contact && <p className="break-all font-mono text-xs text-muted">{contact.address}</p>}
             </div>
-          </div>
-
-          <label className="flex flex-col gap-2">
-            <span className="text-sm text-muted">To</span>
-            <input
-              className="h-14 rounded-2xl border border-line bg-bg px-4 font-mono text-[15px] outline-none focus:border-accent"
-              placeholder="0x… or a contact name"
-              autoCapitalize="off"
-              autoCorrect="off"
-              spellCheck={false}
-              value={to}
-              onChange={(e) => setTo(e.target.value)}
-            />
-          </label>
-
-          {contacts.length ? (
-            <div className="-mt-2 flex flex-wrap gap-2">
-              {contacts.map((c) => (
-                <button
-                  key={c.id}
-                  type="button"
-                  onClick={() => setTo(c.name)}
-                  className={cn(
-                    "rounded-full border px-3 py-1.5 text-sm",
-                    to === c.name ? "border-accent bg-accent/15 text-fg" : "border-line text-muted",
-                  )}
-                >
-                  {c.name} <span className="text-xs opacity-60">{shortAddress(c.address)}</span>
-                </button>
-              ))}
-            </div>
-          ) : null}
-
-          {error ? <p className="text-sm text-danger">{error}</p> : null}
-
-          <Button type="submit" size="lg" variant="light" disabled={!canSubmit}>
-            {busy ? "Preparing…" : "Review"}
-          </Button>
-          <p className="-mt-2 text-center text-xs text-muted">You'll see every detail before anything is sent.</p>
-        </form>
+            {quote?.error && <div className="space-y-2">
+              <p role="alert" className="text-sm text-danger">{quote.error}</p>
+              <Button onClick={() => { setMaximum(null); setQuoteAttempt(v => v + 1); }} variant="ghost">Retry amount</Button>
+            </div>}
+            {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+            <Button type="submit" size="lg" variant="light" disabled={!canSubmit} aria-busy={busy}>
+              {busy && <IconLoader2 className="size-5 motion-safe:animate-spin" aria-hidden="true" />}
+              {busy ? "Preparing…" : "Review"}
+            </Button>
+          </form>
+        )}
       </DrawerContent>
     </Drawer>
   );
+}
+
+function RecipientPicker({ selected, onPick, onBack }: { selected?: string; onPick: (c: Contact) => void; onBack: () => void }) {
+  const resource = useSheetData<{ contacts: Contact[] }>("/contacts");
+  const back = React.useRef<HTMLButtonElement>(null);
+  React.useEffect(() => { back.current?.focus(); }, []);
+  return <div className="space-y-3">
+    <Button ref={back} variant="outline" onClick={onBack}><IconArrowLeft size={16} /> Back to send</Button>
+    <SheetFeedback resource={resource} label="contacts" />
+    {resource.data && (resource.data.contacts.length ? (
+      <ul className="divide-y divide-line rounded-2xl border border-line">
+        {resource.data.contacts.map(c => <li key={c.id}>
+          <button type="button" onClick={() => onPick(c)} aria-pressed={c.id === selected} className="w-full px-4 py-3 text-left active:bg-card-2">
+            <span className="flex items-center justify-between font-medium">{c.name}{c.id === selected && <IconCheck size={16} />}</span>
+            <span className="mt-1 block break-all font-mono text-xs text-muted">{c.address}</span>
+          </button>
+        </li>)}
+      </ul>
+    ) : <p className="text-sm text-muted">No contacts yet. Enter a wallet address to send money.</p>)}
+  </div>;
 }

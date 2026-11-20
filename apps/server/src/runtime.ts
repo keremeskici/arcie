@@ -13,6 +13,8 @@ import { onboard } from "./auth/onboard.js";
 import { createPrivyVerifier } from "./auth/verifier.js";
 import type { Env } from "./env.js";
 import { runAgentTurn, type ChatClient } from "./llm/loop.js";
+import { createTokenUsdPrices } from "./prices/coingecko.js";
+import { refreshIntentStatus } from "./reconcile.js";
 
 // Use the Wallets SDK's CommonJS export on Node runtimes that disable ESM syntax detection.
 const require = createRequire(import.meta.url);
@@ -39,7 +41,11 @@ export async function createRuntime(env: Env): Promise<{ app: Hono; close(): Pro
       ...(env.ARC_RPC_URL ? { rpcUrls: { Arc_Testnet: env.ARC_RPC_URL } } : {}),
     });
     const events = new EventLog(db);
-    const harness = createHarness({ db, kit, policy: new DbPolicyProvider(db), events, confirmChannels: env.CONFIRM_CHANNELS });
+    const tokenUsdPrice = env.COINGECKO_API_KEY ? createTokenUsdPrices({ apiKey: env.COINGECKO_API_KEY }) : undefined;
+    const harness = createHarness({
+      db, kit, policy: new DbPolicyProvider(db), events, confirmChannels: env.CONFIRM_CHANNELS, tokenUsdPrice,
+      refreshIntentStatus: (intent) => refreshIntentStatus({ db, kit, events }, intent, 1_000),
+    });
     const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY }) as unknown as ChatClient;
     const agentDeps = { openai, model: env.OPENAI_MODEL, reasoningEffort: env.OPENAI_REASONING_EFFORT, harness };
 
@@ -66,6 +72,7 @@ export async function createRuntime(env: Env): Promise<{ app: Hono; close(): Pro
       llmSecret: env.LLM_SHARED_SECRET,
       privyAppId: env.PRIVY_APP_ID,
       elevenLabsAgentId: env.ELEVENLABS_AGENT_ID,
+      tokenUsdPrice,
       demoWalletAuth,
       identify: createIdentify({ mode: env.AUTH_MODE, verifier, demoUserId: env.DEMO_USER_ID, demoWalletAuth }),
       onboard: (id) => {

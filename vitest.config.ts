@@ -8,6 +8,9 @@ const projects = ["packages", "apps"].flatMap((group) =>
     .filter((d) => d.isDirectory())
     .map((d) => ({
       extends: true as const,
+      ...(group === "apps" && d.name === "web" ? {
+        resolve: { alias: { "@": fileURLToPath(new URL("./apps/web/src", import.meta.url)) } },
+      } : {}),
       test: { name: d.name, root: fileURLToPath(new URL(`./${group}/${d.name}`, import.meta.url)) },
     })),
 );

@@ -1,3 +1,5 @@
+import type { ActionKind, TokenSymbol } from "./types.js";
+
 /** Island payloads (spec §9.1). The server owns them and pushes them over SSE. */
 export type RichText = { text: string; bold?: boolean }[];
 
@@ -17,10 +19,21 @@ export type IslandPayload =
       steps: { id: string; label: string; status: "running" | "done" | "failed"; error?: string }[];
       elapsedMs: number;
     }
-  | { kind: "choice"; choiceId: string; question: string; options: { id: string; label: string; detail?: string }[] }
+  | {
+      kind: "choice";
+      choiceId: string;
+      question: string;
+      options: { id: string; label: string; detail?: string }[];
+      send?: { amount: string; token: TokenSymbol };
+      expiresAt?: string;
+    }
+  | { kind: "dismiss_choice"; choiceId: string }
+  | { kind: "open_screen"; screen: "activity" | "contacts"; requestId: string }
   | {
       kind: "confirm";
       revision?: number;
+      action?: ActionKind;
+      send?: { amount: string; token: TokenSymbol; recipient: string; address?: string };
       intentId: string;
       /** Phrased as a question naming the exact action and size. */
       title: string;
@@ -35,6 +48,7 @@ export type IslandPayload =
       expiresAt: string;
       spokenPrompt: string;
     }
+  | { kind: "processing"; intentId: string; unverified?: true; summary?: string }
   | {
       kind: "receipt";
       intentId: string;
@@ -57,6 +71,7 @@ export type IslandPayload =
 export type StepsIsland = Extract<IslandPayload, { kind: "steps" }>;
 export type ChoiceIsland = Extract<IslandPayload, { kind: "choice" }>;
 export type ConfirmIsland = Extract<IslandPayload, { kind: "confirm" }>;
+export type ProcessingIsland = Extract<IslandPayload, { kind: "processing" }>;
 export type ReceiptIsland = Extract<IslandPayload, { kind: "receipt" }>;
 export type OnrampIsland = Extract<IslandPayload, { kind: "onramp" }>;
 export type ReceiveIsland = Extract<IslandPayload, { kind: "receive" }>;

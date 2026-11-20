@@ -50,6 +50,13 @@
       "when": 1795190480984,
       "tag": "0006_roles_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1795197342247,
+      "tag": "0007_wallet_voice_choices",
+      "breakpoints": true
     }
   ]
 }

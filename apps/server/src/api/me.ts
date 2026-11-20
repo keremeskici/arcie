@@ -1,21 +1,24 @@
-import { getWallet, HOME_CHAIN } from "@arcie/appkit";
-import { ArcieError, type TokenSymbol } from "@arcie/core";
+import { getWallet, HOME_CHAIN, readSavings } from "@arcie/appkit";
+import { ArcieError } from "@arcie/core";
 import { audit, intents, users, wallets } from "@arcie/db";
-import { DbPolicyProvider } from "@arcie/harness";
-import { and, desc, eq } from "drizzle-orm";
+import { DbPolicyProvider, quoteSendMax, readWalletBalances } from "@arcie/harness";
+import { and, desc, eq, like, or } from "drizzle-orm";
 import { Hono } from "hono";
-import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import { getAddress } from "viem";
 import { z } from "zod";
 import type { AppDeps } from "../create-app.js";
 import { reconcileUser } from "../reconcile.js";
 import { admitTurn } from "../auth/identify.js";
 import { screenCtx } from "./http.js";
 
-const round2 = (n: number) => Math.round(n * 100) / 100;
 const swapQuoteBody = z.object({
   tokenIn: z.enum(["USDC", "EURC", "cirBTC"]),
   tokenOut: z.enum(["USDC", "EURC", "cirBTC"]),
   amountIn: z.string().min(1),
+  maxSlippageBps: z.number().int().min(0).max(10_000).optional(),
+});
+const typedChatBody = z.object({
+  messages: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string() })),
 });
 const activitySummary: Record<string, string> = {
   "intent.proposed": "Ready for your confirmation.",
@@ -51,27 +54,22 @@ export function meRoutes(deps: AppDeps) {
     if (!user) throw new ArcieError("NOT_FOUND", { spoken: "I don't know this account yet." });
     const ws = await deps.db.select().from(wallets).where(eq(wallets.userId, userId));
     const limits = await new DbPolicyProvider(deps.db).getLimits(userId);
-    return c.json({ user, wallets: ws.map((w) => ({ chain: w.chain, address: w.address })), limits });
+    return c.json({ user, wallets: ws.map((w) => ({ chain: w.chain, address: getAddress(w.address) })), limits });
   });
 
   app.get("/balances", async (c) => {
     const { userId } = await deps.identify(c);
     const w = await getWallet(deps.db, userId, HOME_CHAIN);
     if (!w) throw new ArcieError("NOT_FOUND", { spoken: "Your wallet isn't set up yet." });
-    const balances = await deps.kit.getBalances(w);
-    const tokens = await Promise.all(
-      balances.map(async (b) => {
-        if (Number(b.amount) === 0) return { ...b, usd: 0 };
-        const rate = await deps.kit
-          .getUsdRates(w.chain, [b.token as TokenSymbol])
-          .then((r) => r[b.token as TokenSymbol])
-          .catch(() => null);
-        return { ...b, usd: rate === null || !Number.isFinite(rate) ? null : round2(Number(b.amount) * rate) };
-      }),
-    );
-    const knownSubtotalUsd = round2(tokens.reduce((s, t) => s + (t.usd ?? 0), 0));
-    const totalUsd = tokens.some((t) => t.usd === null) ? null : knownSubtotalUsd;
+    const { tokens, totalUsd, knownSubtotalUsd } = await readWalletBalances(deps.kit, w, deps.tokenUsdPrice);
     return c.json({ chains: [{ chain: w.chain, tokens }], totalUsd, knownSubtotalUsd });
+  });
+
+  app.get("/savings", async (c) => {
+    const { userId } = await deps.identify(c);
+    const wallet = await getWallet(deps.db, userId, HOME_CHAIN);
+    if (!wallet) throw new ArcieError("NOT_FOUND", { spoken: "Your wallet isn't set up yet." });
+    return c.json(await readSavings(deps.kit, wallet));
   });
 
   app.get("/vaults", async (c) => {
@@ -86,19 +84,25 @@ export function meRoutes(deps: AppDeps) {
     return c.json({ vaults, positions });
   });
 
+  app.get("/quotes/send-max", async (c) => {
+    const ctx = await screenCtx(deps, c);
+    const to = c.req.query("to")?.trim();
+    const token = z.enum(["USDC", "EURC", "cirBTC"]).safeParse(c.req.query("token"));
+    if (!token.success) return c.json({ error: { code: "INVALID_ARGS", message: "Choose a wallet currency." } }, 400);
+    c.header("Cache-Control", "no-store");
+    return c.json(await quoteSendMax(deps, ctx, to, token.data));
+  });
+
   app.post("/quotes/swap", async (c) => {
     const parsed = swapQuoteBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: { code: "INVALID_ARGS", message: "Invalid swap quote arguments." } }, 400);
     const ctx = await screenCtx(deps, c);
-    const r = await deps.harness.runTool(ctx, "get_swap_quote", parsed.data);
-    const err = (r.data as { error?: string } | undefined)?.error;
-    if (err) return c.json({ error: { code: err, message: r.summary } }, 400);
-    return c.json({ summary: r.summary, data: r.data });
+    return c.json(await deps.harness.quoteSwap(ctx, parsed.data));
   });
 
   app.post("/receive", async (c) => {
     const ctx = await screenCtx(deps, c);
-    const r = await deps.harness.runTool(ctx, "get_receive_info", {});
+    const r = await deps.harness.runTool({ ...ctx, receiveResponseOnly: c.req.query("delivery") === "response" }, "get_receive_info", {});
     const err = (r.data as { error?: string } | undefined)?.error;
     if (err) return c.json({ error: { code: err, message: r.summary } }, 400);
     return c.json({ summary: r.summary, island: r.island, data: r.data });
@@ -106,8 +110,9 @@ export function meRoutes(deps: AppDeps) {
 
   app.post("/chat", async (c) => {
     const ctx = await screenCtx(deps, c, { allowDemo: false });
-    const body = (await c.req.json().catch(() => ({}))) as { messages?: ChatCompletionMessageParam[] };
-    const messages = Array.isArray(body.messages) ? body.messages : [];
+    const parsed = typedChatBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: { code: "INVALID_ARGS", message: "Enter a chat message to continue." } }, 400);
+    const { messages } = parsed.data;
     const userTurn = messages.filter((m) => m.role === "user").length;
     let reply = "";
     if (await admitTurn(deps.db, ctx.sessionId, ctx.userId, "repl", userTurn)) {
@@ -123,16 +128,13 @@ export function meRoutes(deps: AppDeps) {
       ? await deps.db.select({ id: intents.id }).from(intents).where(and(eq(intents.userId, userId), eq(intents.status, "executing")))
       : undefined;
     await reconcileUser(deps, userId); // bounded and deduplicated; never blocks the read on a failing check
-    const rows = await deps.db.select().from(audit).where(eq(audit.userId, userId)).orderBy(desc(audit.id)).limit(50);
-    const items = rows
-      .filter((r) => r.type.startsWith("intent.") || r.type.startsWith("onramp."))
-      .map((r) => ({
-        at: r.createdAt,
-        type: r.type,
-        intentId: r.intentId,
-        // Audit payloads contain internal diagnostics and are never an API contract.
-        summary: activitySummary[r.type] ?? "Account activity updated.",
-      }));
+    const rows = await deps.db
+      .select({ at: audit.createdAt, type: audit.type, intentId: audit.intentId })
+      .from(audit)
+      .where(and(eq(audit.userId, userId), or(like(audit.type, "intent.%"), like(audit.type, "onramp.%"))))
+      .orderBy(desc(audit.id))
+      .limit(50);
+    const items = rows.map((row) => ({ ...row, summary: activitySummary[row.type] ?? "Account activity updated." }));
     return c.json({ items, ...(pending ? { executing: pending.map((i) => i.id) } : {}) });
   });
 

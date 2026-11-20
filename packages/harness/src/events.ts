@@ -2,7 +2,9 @@ import type { ArcieError, IslandPayload, StepsIsland } from "@arcie/core";
 import { sessionEvents, sessionState, type Db, type DbOrTx } from "@arcie/db";
 import { randomUUID } from "node:crypto";
 import { and, asc, eq, gt, min, sql } from "drizzle-orm";
+import { activeContactChoice, contactChoiceIsland } from "./contact-choices.js";
 import type { HarnessCtx } from "./context.js";
+import { guardSession } from "./coordination.js";
 import { IntentRepo, savedCard } from "./intents/repo.js";
 
 const PRUNE_EVERY_MS = 60_000;
@@ -48,6 +50,19 @@ export class EventLog {
     return this.append(this.db, sessionId, island);
   }
 
+  /** Publish only while the request still owns its session or admitted turn. */
+  async publishFor(ctx: HarnessCtx, island: IslandPayload): Promise<void> {
+    if (ctx.signal?.aborted) return;
+    const interrupted = new Error("request interrupted");
+    await this.db.transaction(async (tx) => {
+      await this.append(tx, ctx.sessionId, island);
+      await guardSession(tx, ctx);
+      if (ctx.signal?.aborted) throw interrupted;
+    }).catch((err) => {
+      if (err !== interrupted) throw err;
+    });
+  }
+
   async readAfter(sessionId: string, afterSeq: number, limit = 100): Promise<{ seq: number; island: IslandPayload }[]> {
     const rows = await this.db
       .select({ seq: sessionEvents.seq, payload: sessionEvents.payload })
@@ -59,7 +74,7 @@ export class EventLog {
   }
 
   /**
-   * What a fresh stream starts from: the open card (else the latest receipt) and the log cursor, read in one
+   * What a fresh stream starts from: the open choice or card (else execution state or receipt) and the cursor, read in one
    * repeatable-read transaction so an event is either reflected in the islands or after the cursor, never lost.
    */
   async snapshot(sessionId: string): Promise<{ cursor: number; islands: IslandPayload[] }> {
@@ -69,9 +84,11 @@ export class EventLog {
         const cursor = state ? Number(state.next) - 1 : 0;
         await this.onSnapshotRead?.();
         const repo = new IntentRepo(tx);
-        const open = await repo.openForSession(sessionId, new Date());
+        const now = new Date();
+        const choice = await activeContactChoice(tx, sessionId, now);
+        const open = await repo.openForSession(sessionId, now);
         const card = open ? savedCard(open) : undefined;
-        const initial = card ?? (await repo.latestReceiptForSession(sessionId));
+        const initial = card ?? (choice ? contactChoiceIsland(choice) : await repo.latestExecutionForSession(sessionId));
         return { cursor, islands: initial ? [initial] : [] };
       },
       { isolationLevel: "repeatable read" },
@@ -152,6 +169,6 @@ export class StepTracker {
       elapsedMs: this.ctx.now().getTime() - this.startedAt,
     };
     // Progress is advisory: a failed append must never break the run, and appends stay in order.
-    this.chain = this.chain.then(() => this.events.publish(this.ctx.sessionId, island)).catch(() => undefined);
+    this.chain = this.chain.then(() => this.events.publishFor(this.ctx, island)).catch(() => undefined);
   }
 }

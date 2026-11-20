@@ -1,5 +1,5 @@
 import type { Channel } from "@arcie/core";
-import { users, type Db } from "@arcie/db";
+import { sessions, users, type Db } from "@arcie/db";
 import type { HarnessCtx } from "@arcie/harness";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -16,8 +16,9 @@ interface ChatBody {
   messages?: ChatCompletionMessageParam[];
   user_id?: string;
   session_id?: string;
+  arcie_conversation_id?: string;
   arcie_channel?: Channel;
-  elevenlabs_extra_body?: { user_id?: string; session_id?: string };
+  elevenlabs_extra_body?: { user_id?: string; session_id?: string; arcie_conversation_id?: string };
 }
 
 /**
@@ -33,33 +34,52 @@ export function chatRoutes(deps: { db: Db; agent: AgentFn; demoUserId: string; m
     if (deps.llmSecret && !timingSafeEqualStr(c.req.header("authorization") ?? "", `Bearer ${deps.llmSecret}`)) {
       return c.json({ error: { message: "Missing or wrong LLM secret.", type: "invalid_request_error", code: "UNAUTHENTICATED" } }, 401);
     }
-    const body = (await c.req.json().catch(() => ({}))) as ChatBody;
+    const body = ((await c.req.json().catch(() => null)) ?? {}) as ChatBody;
     const messages = Array.isArray(body.messages) ? body.messages : [];
     if (process.env.LOG_LLM_REQUESTS) {
       console.log("[llm] request received", { messageCount: messages.length });
     }
     const extra = body.elevenlabs_extra_body;
     const requestedSession = body.session_id ?? extra?.session_id ?? c.req.header("x-arcie-session");
+    const conversationId = body.arcie_conversation_id ?? extra?.arcie_conversation_id ?? null;
     let userId: string;
     let sessionId: string;
+    let stored: typeof sessions.$inferSelect | undefined;
     if (deps.authMode === "privy") {
       // The request comes from ElevenLabs' servers: trust only the user-bound voice session, never user_id in the body.
       const bound = await resolveVoiceSession(deps.db, requestedSession);
       if (!bound) return c.json({ error: { message: "Unknown or expired voice session.", type: "invalid_request_error", code: "UNAUTHENTICATED" } }, 401);
       userId = bound.userId;
       sessionId = requestedSession!;
+      stored = bound;
     } else {
       userId = body.user_id ?? extra?.user_id ?? c.req.header("x-arcie-user") ?? deps.demoUserId;
       if (!(await deps.db.select().from(users).where(eq(users.id, userId)).limit(1))[0]) {
         return c.json({ error: { message: `Unknown user ${userId}`, type: "invalid_request_error" } }, 404);
       }
       sessionId = requestedSession ?? `default:${userId}`;
+      [stored] = await deps.db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1);
+      if (stored && stored.userId !== userId) {
+        return c.json({ error: { message: "This session belongs to another user.", type: "invalid_request_error", code: "UNAUTHENTICATED" } }, 401);
+      }
     }
     const channel: Channel = body.arcie_channel === "repl" ? "repl" : "voice";
 
-    // userTurn = number of user messages; replays/retries must never lower it.
-    const userTurn = messages.filter((m) => m.role === "user").length;
-    const accepted = await admitTurn(deps.db, sessionId, userId, channel, userTurn);
+    const staleConversation = () =>
+      c.json({ error: { message: "That voice conversation was replaced. Reopen voice to continue.", type: "invalid_request_error", code: "STALE_CONVERSATION" } }, 409);
+    if (channel === "voice" && conversationId !== (stored?.conversationId ?? null)) return staleConversation();
+    const incoming = messages.filter((m) => m?.role === "user").length;
+    const userTurn = incoming + (channel === "voice" ? stored?.conversationStartTurn ?? 0 : 0);
+    const accepted = incoming > 0 && await admitTurn(deps.db, sessionId, userId, channel, userTurn, {
+      existing: deps.authMode === "privy" || conversationId !== null,
+      ...(channel === "voice" ? { conversationId } : {}),
+    });
+    if (incoming > 0 && !accepted && stored && channel === "voice") {
+      // The binding may have changed between the lookup and the compare-and-set.
+      const [current] = await deps.db.select({ conversationId: sessions.conversationId })
+        .from(sessions).where(eq(sessions.id, sessionId)).limit(1);
+      if (current && current.conversationId !== conversationId) return staleConversation();
+    }
     const ac = new AbortController();
     if (accepted) {
       inflight.get(sessionId)?.abort();

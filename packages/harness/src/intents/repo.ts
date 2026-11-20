@@ -1,7 +1,8 @@
-import type { ActionKind, ChainId, ConfirmIsland, ReceiptIsland } from "@arcie/core";
+import type { ActionKind, ChainId, ConfirmIsland, ProcessingIsland, ReceiptIsland } from "@arcie/core";
 import { confirmClaims, intents, type DbOrTx, type IntentStatus } from "@arcie/db";
-import { and, desc, eq, gte, isNull, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
+import { savedReview } from "../disclosure/savings.js";
 import { paramsHash } from "./hash.js";
 
 export const QUOTE_FRESH_MS = 30_000;
@@ -10,8 +11,16 @@ export type { IntentStatus } from "@arcie/db";
 export type Intent = typeof intents.$inferSelect;
 /** Older stored cards lack a revision; redisplay them with their durable version before asking for a tap. */
 export function savedCard(intent: Intent): ConfirmIsland | undefined {
-  const card = intent.preview?.island as ConfirmIsland | undefined;
-  if (card?.kind === "confirm") return { ...card, revision: intent.revision };
+  return savedReview(intent) ?? undefined;
+}
+
+export function savedProcessing(intent: Intent): ProcessingIsland | undefined {
+  if (intent.status !== "executing") return undefined;
+  return {
+    kind: "processing", intentId: intent.id,
+    ...(intent.statusReason === "submission_unknown" ? { unverified: true as const } : {}),
+    ...(intent.error ? { summary: intent.error.message } : {}),
+  };
 }
 
 type IntentPatch = Partial<Omit<Intent, "id" | "status" | "createdAt" | "revision">>;
@@ -24,6 +33,8 @@ const revisionBump = (patch: IntentPatch) =>
 export interface IntentDraft {
   /** Lets the caller reference the id (e.g. as `supersededBy`) before the row exists. */
   id?: string;
+  confirmedVia?: Intent["confirmedVia"];
+  error?: Intent["error"];
   sessionId: string;
   userId: string;
   kind: ActionKind;
@@ -31,22 +42,24 @@ export interface IntentDraft {
   params: Record<string, unknown>;
   preview: Record<string, unknown>;
   status: IntentStatus;
-  statusReason?: string;
+  statusReason?: string | null;
   usdValue: string;
   previewTurn: number;
   now: Date;
-  ttlSec: number;
+  ttlSec: number | null;
 }
 
 export class IntentRepo {
   constructor(private readonly db: DbOrTx) {}
 
-  async create(d: IntentDraft): Promise<Intent> {
+  private insert(d: IntentDraft) {
     const now = d.now.toISOString();
-    const [row] = await this.db
+    return this.db
       .insert(intents)
       .values({
         id: d.id ?? randomUUID(),
+        confirmedVia: d.confirmedVia ?? null,
+        error: d.error ?? null,
         sessionId: d.sessionId,
         userId: d.userId,
         kind: d.kind,
@@ -61,10 +74,18 @@ export class IntentRepo {
         quoteAt: now,
         createdAt: now,
         updatedAt: now,
-        expiresAt: new Date(d.now.getTime() + d.ttlSec * 1000).toISOString(),
-      })
-      .returning();
+        expiresAt: d.ttlSec === null ? null : new Date(d.now.getTime() + d.ttlSec * 1000).toISOString(),
+      });
+  }
+
+  async create(d: IntentDraft): Promise<Intent> {
+    const [row] = await this.insert(d).returning();
     return row!;
+  }
+
+  async createIfAbsent(d: IntentDraft & { id: string }): Promise<Intent | null> {
+    const [row] = await this.insert(d).onConflictDoNothing({ target: intents.id }).returning();
+    return row ?? null;
   }
 
   async get(id: string): Promise<Intent | null> {
@@ -144,7 +165,7 @@ export class IntentRepo {
   }
 
   /** Cancels every other awaiting intent in the session (only one Confirm island is ever open); returns their ids. */
-  async supersedeOpen(sessionId: string, newIntentId: string): Promise<string[]> {
+  async supersedeOpen(sessionId: string, newIntentId?: string): Promise<string[]> {
     const rows = await this.db
       .select({ id: intents.id })
       .from(intents)
@@ -152,7 +173,7 @@ export class IntentRepo {
     const superseded: string[] = [];
     for (const r of rows) {
       if (r.id === newIntentId) continue;
-      if (await this.transition(r.id, "awaiting_confirmation", "cancelled", { statusReason: "superseded", supersededBy: newIntentId })) superseded.push(r.id);
+      if (await this.transition(r.id, "awaiting_confirmation", "cancelled", { statusReason: "superseded", supersededBy: newIntentId ?? null })) superseded.push(r.id);
     }
     return superseded;
   }
@@ -162,11 +183,11 @@ export class IntentRepo {
     return this.openForSession(sessionId, new Date(0));
   }
 
-  async latestReceiptForSession(sessionId: string): Promise<ReceiptIsland | null> {
+  async latestExecutionForSession(sessionId: string): Promise<ProcessingIsland | ReceiptIsland | null> {
     const [row] = await this.db.select().from(intents)
-      .where(and(eq(intents.sessionId, sessionId), or(eq(intents.status, "succeeded"), eq(intents.status, "failed"))))
+      .where(and(eq(intents.sessionId, sessionId), inArray(intents.status, ["executing", "succeeded", "failed"])))
       .orderBy(desc(intents.updatedAt)).limit(1);
-    return (row?.preview?.receipt as ReceiptIsland | undefined) ?? null;
+    return row ? savedProcessing(row) ?? (row.preview?.receipt as ReceiptIsland | undefined) ?? null : null;
   }
 
   /** Outflows only: withdrawals from the user's own vault back to their wallet don't use up limits. */

@@ -5,6 +5,8 @@ export interface IntentStatusView {
   island?: IslandPayload | null;
   checking?: boolean;
   expiresAt?: string | null;
+  statusReason?: string | null;
+  error?: { message?: string } | null;
 }
 
 /** One authenticated read at a time. The interval backs off to ten seconds during long settlements. */

@@ -41,26 +41,51 @@ export function PrivyLogin({ onDemoLogin }: { onDemoLogin?: (() => Promise<void>
   const [email, setEmail] = React.useState("");
   const [code, setCode] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
+  const [codeSent, setCodeSent] = React.useState(false);
+  const [pending, setPending] = React.useState(false);
   const [openingDemo, setOpeningDemo] = React.useState(false);
-  const codeSent = state.status === "awaiting-code-input" || state.status === "submitting-code";
-  const busy = state.status === "sending-code" || state.status === "submitting-code";
+  const inFlight = React.useRef(false);
+  const busy = pending || oauthLoading || state.status === "sending-code" || state.status === "submitting-code";
 
-  const run = (fn: () => Promise<void>) => {
+  async function run(fn: () => void | Promise<void>) {
+    if (inFlight.current || busy) return;
+    inFlight.current = true;
+    setPending(true);
     setError(null);
-    fn().catch((e: unknown) => setError(e instanceof Error ? e.message : "Sign-in failed. Try again."));
-  };
+    try {
+      await fn();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Sign-in failed. Try again.");
+    } finally {
+      inFlight.current = false;
+      setPending(false);
+    }
+  }
+
+  function back() {
+    setError(null);
+    setCode("");
+    if (codeSent) setCodeSent(false);
+    else setEmailMode(false);
+  }
 
   if (emailMode) {
     return (
       <LoginShell>
-        <button className="mb-1 inline-flex items-center gap-1.5 self-start text-sm text-muted" onClick={() => setEmailMode(false)}>
+        <button className="mb-1 inline-flex items-center gap-1.5 self-start text-sm text-muted" onClick={back} disabled={busy}>
           <IconArrowLeft className="size-4" /> Back
         </button>
         {!codeSent ? (
-          <form className="flex flex-col gap-3" onSubmit={(e) => (e.preventDefault(), run(() => sendCode({ email })))}>
+          <form className="flex flex-col gap-3" onSubmit={(e) => {
+            e.preventDefault();
+            void run(async () => { await sendCode({ email: email.trim() }); setCodeSent(true); });
+          }}>
             <input
               className="h-14 rounded-2xl border border-line bg-card px-4 text-base outline-none focus:border-accent"
               type="email"
+              aria-label="Email address"
+              required
+              disabled={busy}
               inputMode="email"
               autoComplete="email"
               placeholder="you@example.com"
@@ -73,11 +98,16 @@ export function PrivyLogin({ onDemoLogin }: { onDemoLogin?: (() => Promise<void>
             </Button>
           </form>
         ) : (
-          <form className="flex flex-col gap-3" onSubmit={(e) => (e.preventDefault(), run(() => loginWithCode({ code })))}>
+          <form className="flex flex-col gap-3" onSubmit={(e) => {
+            e.preventDefault();
+            if (code.length === 6) void run(() => loginWithCode({ code }));
+          }}>
             <p className="text-sm text-muted">Enter the 6-digit code we sent to {email}.</p>
             <input
               className="h-14 rounded-2xl border border-line bg-card px-4 text-center text-2xl tracking-[0.5em] outline-none focus:border-accent"
               inputMode="numeric"
+              aria-label="Verification code"
+              disabled={busy}
               autoComplete="one-time-code"
               maxLength={6}
               value={code}
@@ -89,32 +119,32 @@ export function PrivyLogin({ onDemoLogin }: { onDemoLogin?: (() => Promise<void>
             </Button>
           </form>
         )}
-        {error ? <p className="text-center text-sm text-danger">{error}</p> : null}
+        {error ? <p role="alert" className="text-center text-sm text-danger">{error}</p> : null}
       </LoginShell>
     );
   }
 
   return (
     <LoginShell>
-      <Button size="lg" variant="light" disabled={oauthLoading} onClick={() => run(() => initOAuth({ provider: "google" }))}>
+      <Button size="lg" variant="light" disabled={busy} onClick={() => void run(() => initOAuth({ provider: "google" }))}>
         <GoogleIcon /> Continue with Google
       </Button>
-      <Button size="lg" variant="dark" disabled={oauthLoading} onClick={() => run(() => initOAuth({ provider: "apple" }))}>
+      <Button size="lg" variant="dark" disabled={busy} onClick={() => void run(() => initOAuth({ provider: "apple" }))}>
         <IconBrandAppleFilled className="size-5" /> Continue with Apple
       </Button>
-      <Button size="lg" variant="ghost" onClick={() => setEmailMode(true)}>
+      <Button size="lg" variant="ghost" disabled={busy} onClick={() => { setError(null); setEmailMode(true); }}>
         <IconMail className="size-5" /> Continue with email
       </Button>
       {onDemoLogin ? (
-        <Button size="lg" variant="outline" disabled={openingDemo} onClick={() => {
+        <Button size="lg" variant="outline" disabled={busy} onClick={() => void run(async () => {
           setOpeningDemo(true);
-          run(() => onDemoLogin().finally(() => setOpeningDemo(false)));
-        }}>
+          try { await onDemoLogin(); } finally { setOpeningDemo(false); }
+        })}>
           <IconWallet className="size-5" aria-hidden />
           {openingDemo ? "Opening demo wallet…" : "Open demo wallet"}
         </Button>
       ) : null}
-      <button className="mt-1 text-sm text-muted underline-offset-4 hover:underline" onClick={() => login()}>
+      <button className="mt-1 text-sm text-muted underline-offset-4 hover:underline" disabled={busy} onClick={() => void run(() => login({ loginMethods: ["wallet"] }))}>
         More options
       </button>
       {error ? <p role="alert" className="text-center text-sm text-danger">{error}</p> : null}
