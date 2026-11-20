@@ -95,3 +95,41 @@ describe("onramp routes", () => {
     expect(items[0]).toMatchObject({ type: "onramp.settled" });
   });
 });
+
+describe("GET /events disconnect during the late-joiner lookup", () => {
+  it("releases the bus subscription when the client aborts while the lookup is pending", async () => {
+    const { app, bus, harness } = await testApp();
+    let live = 0;
+    const subscribe = bus.subscribe.bind(bus);
+    bus.subscribe = (sid, fn) => {
+      live++;
+      const off = subscribe(sid, fn);
+      let released = false;
+      return () => {
+        if (!released) live--;
+        released = true;
+        off();
+      };
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const open = harness.intents.openForSession.bind(harness.intents);
+    harness.intents.openForSession = async (...args) => {
+      await gate;
+      return open(...args);
+    };
+    
+    const res = await app.request("/events?sessionId=s1");
+    const reader = res.body!.getReader();
+    const pending = reader.read().catch(() => null);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(live).toBe(1);
+    await reader.cancel(); // client disconnect
+    await new Promise((r) => setTimeout(r, 50));
+    expect(live).toBe(0);
+    release();
+    await pending;
+    await new Promise((r) => setTimeout(r, 50));
+    expect(live).toBe(0);
+  });
+});

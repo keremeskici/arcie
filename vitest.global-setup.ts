@@ -8,16 +8,16 @@
  * Each project runs this setup, so server start/stop is reference-counted in the main process.
  */
 import EmbeddedPostgres from "embedded-postgres";
-import { existsSync, readFileSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import type { TestProject } from "vitest/node";
 import { migrateDb } from "./packages/db/src/migrate.js";
 import { TEMPLATE_DB, withDatabase } from "./packages/db/src/testing-shared.js";
 
-const DATA_DIR = fileURLToPath(new URL("./.superpowers/pg-test/data", import.meta.url));
+const BASE_DIR = fileURLToPath(new URL("./.superpowers/pg-test", import.meta.url));
 
 interface Booted {
   url: string;
@@ -40,21 +40,23 @@ function freePort(): Promise<number> {
   });
 }
 
-/** A crashed earlier run can leave a live server and a data dir behind: stop it, then wipe the dir. */
-async function clearStaleDataDir(): Promise<void> {
-  const pidFile = `${DATA_DIR}/postmaster.pid`;
-  if (existsSync(pidFile)) {
-    const pid = Number(readFileSync(pidFile, "utf8").split("\n")[0]);
-    if (pid > 0) {
-      try {
-        process.kill(pid, "SIGINT");
-        await new Promise((r) => setTimeout(r, 1000));
-      } catch {
-        // not running
-      }
-    }
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
   }
-  await rm(DATA_DIR, { recursive: true, force: true });
+};
+
+/** Each run owns a fresh directory. Only dirs whose owning run is gone are swept; nothing is ever killed. */
+async function sweepDeadRuns(): Promise<void> {
+  for (const name of await readdir(BASE_DIR).catch(() => [])) {
+    if (!name.startsWith("run-")) continue;
+    const dir = join(BASE_DIR, name);
+    const owner = Number(await readFile(join(dir, "owner.pid"), "utf8").catch(() => "0"));
+    if (owner > 0 && !alive(owner)) await rm(dir, { recursive: true, force: true });
+  }
 }
 
 async function boot(): Promise<Booted> {
@@ -64,11 +66,14 @@ async function boot(): Promise<Booted> {
   if (process.env.TEST_DATABASE_URL) {
     serverUrl = process.env.TEST_DATABASE_URL;
   } else {
-    await clearStaleDataDir();
-    await mkdir(DATA_DIR, { recursive: true });
+    await mkdir(BASE_DIR, { recursive: true });
+    await sweepDeadRuns();
+    const runDir = await mkdtemp(join(BASE_DIR, "run-"));
+    await writeFile(join(runDir, "owner.pid"), String(process.pid));
+    const dataDir = join(runDir, "data");
     const port = await freePort();
     const pg = new EmbeddedPostgres({
-      databaseDir: DATA_DIR,
+      databaseDir: dataDir,
       port,
       user: "postgres",
       password: "password",
@@ -80,7 +85,7 @@ async function boot(): Promise<Booted> {
     await pg.start();
     stopServer = async () => {
       await pg.stop();
-      await rm(DATA_DIR, { recursive: true, force: true });
+      await rm(runDir, { recursive: true, force: true });
     };
     serverUrl = `postgres://postgres:password@127.0.0.1:${port}/postgres`;
   }

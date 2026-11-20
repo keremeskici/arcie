@@ -30,22 +30,10 @@ export function eventRoutes(deps: AppDeps & { authorizeSession?: (sessionId: str
       // Subscribe before the (now async) lookup so an island published meanwhile is not lost.
       const off = deps.bus.subscribe(sessionId, push);
 
-      // A client that connects late still sees the card that's waiting for it.
-      try {
-        const open = await deps.harness.intents.openForSession(sessionId, new Date());
-        const openIsland = (open?.preview as { island?: IslandPayload } | null)?.island;
-        const initial = openIsland ?? (await deps.harness.intents.latestReceiptForSession(sessionId));
-        if (initial) queue.unshift(initial);
-      } catch (e) {
-        off();
-        throw e;
-      }
       let closed = false;
       let pingDue = false;
-      const ping = setInterval(() => {
-        pingDue = true;
-        wake?.();
-      }, PING_MS);
+      let ping: ReturnType<typeof setInterval> | undefined;
+      // Registered before any await so a disconnect during the lookup still releases everything.
       stream.onAbort(() => {
         closed = true;
         clearInterval(ping);
@@ -55,6 +43,17 @@ export function eventRoutes(deps: AppDeps & { authorizeSession?: (sessionId: str
 
       const authorized = async () => !deps.authorizeSession || await deps.authorizeSession(sessionId);
       try {
+        // A client that connects late still sees the card that's waiting for it.
+        const open = await deps.harness.intents.openForSession(sessionId, new Date());
+        const openIsland = (open?.preview as { island?: IslandPayload } | null)?.island;
+        const initial = openIsland ?? (await deps.harness.intents.latestReceiptForSession(sessionId));
+        if (initial) queue.unshift(initial);
+        if (!closed) {
+          ping = setInterval(() => {
+            pingDue = true;
+            wake?.();
+          }, PING_MS);
+        }
         while (!closed) {
           if (!(await authorized())) break;
           while (queue.length && !closed) {
