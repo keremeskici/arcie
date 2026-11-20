@@ -81,8 +81,9 @@ describe("IntentRepo", () => {
 
   it("supersedes the open intent when a new one is proposed", async () => {
     const old = await repo.create(draft());
-    const next = await repo.create(draft({ params: { amount: "6" } }));
-    await repo.supersedeOpen("s1", next.id);
+    // Supersede first: the database allows only one awaiting intent per session.
+    await repo.supersedeOpen("s1", "next-id");
+    const next = await repo.create(draft({ id: "next-id", params: { amount: "6" } }));
     const o = (await repo.get(old.id))!;
     expect(o.status).toBe("cancelled");
     expect(o.statusReason).toBe("superseded");
@@ -133,8 +134,8 @@ describe("assertConfirmable", () => {
 
   it("rejects a superseded intent with NOT_FOUND", async () => {
     const old = await repo.create(draft());
-    const next = await repo.create(draft());
-    await repo.supersedeOpen("s1", next.id);
+    await repo.supersedeOpen("s1", "next-id");
+    await repo.create(draft({ id: "next-id" }));
     const stored = await repo.get(old.id);
     const err = caught(() => assertConfirmable(stored, { channel: "screen", userTurn: 3, now: at(5) }));
     expect(err.code).toBe("NOT_FOUND");

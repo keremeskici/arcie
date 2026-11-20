@@ -1,4 +1,5 @@
 import type { ActionKind, AgentLimits, ChainId, Channel } from "@arcie/core";
+import { sql } from "drizzle-orm";
 import { bigint, integer, jsonb, pgSchema, text, uniqueIndex } from "drizzle-orm/pg-core";
 
 const now = () => new Date().toISOString();
@@ -69,29 +70,47 @@ export type IntentStatus =
   | "succeeded"
   | "failed";
 
-export const intents = table("intents", {
-  id: text("id").primaryKey(),
-  sessionId: text("session_id").notNull(),
-  userId: text("user_id").notNull().references(() => users.id),
-  kind: text("kind").$type<ActionKind>().notNull(),
-  chain: text("chain").$type<ChainId>().notNull(),
-  params: jsonb("params").$type<Record<string, unknown>>().notNull(),
-  paramsHash: text("params_hash").notNull(),
-  preview: jsonb("preview").$type<Record<string, unknown>>(),
-  status: text("status").$type<IntentStatus>().notNull(),
-  statusReason: text("status_reason"),
-  usdValue: text("usd_value"),
-  previewTurn: integer("preview_turn").notNull().default(0),
-  quoteAt: text("quote_at"),
-  confirmedVia: text("confirmed_via").$type<Channel>(),
-  supersededBy: text("superseded_by"),
-  txHash: text("tx_hash"),
-  actuals: jsonb("actuals").$type<Record<string, unknown>>(),
-  error: jsonb("error").$type<{ code: string; message: string }>(),
-  createdAt: text("created_at").notNull().$defaultFn(now),
-  updatedAt: text("updated_at").notNull().$defaultFn(now),
-  expiresAt: text("expires_at"),
+/**
+ * Cross-instance coordination per session. Rows are created on demand (screen sessions have no `sessions` row).
+ * `proposal_generation` orders proposals and cancels; `preparing_generation` is set while a proposal is in flight.
+ */
+export const sessionState = table("session_state", {
+  sessionId: text("session_id").primaryKey(),
+  proposalGeneration: integer("proposal_generation").notNull().default(0),
+  preparingGeneration: integer("preparing_generation"),
+  nextEventSeq: bigint("next_event_seq", { mode: "number" }).notNull().default(1),
 });
+
+export const intents = table(
+  "intents",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id").notNull(),
+    userId: text("user_id").notNull().references(() => users.id),
+    kind: text("kind").$type<ActionKind>().notNull(),
+    chain: text("chain").$type<ChainId>().notNull(),
+    params: jsonb("params").$type<Record<string, unknown>>().notNull(),
+    paramsHash: text("params_hash").notNull(),
+    preview: jsonb("preview").$type<Record<string, unknown>>(),
+    status: text("status").$type<IntentStatus>().notNull(),
+    statusReason: text("status_reason"),
+    usdValue: text("usd_value"),
+    previewTurn: integer("preview_turn").notNull().default(0),
+    quoteAt: text("quote_at"),
+    confirmedVia: text("confirmed_via").$type<Channel>(),
+    supersededBy: text("superseded_by"),
+    txHash: text("tx_hash"),
+    actuals: jsonb("actuals").$type<Record<string, unknown>>(),
+    error: jsonb("error").$type<{ code: string; message: string }>(),
+    createdAt: text("created_at").notNull().$defaultFn(now),
+    updatedAt: text("updated_at").notNull().$defaultFn(now),
+    expiresAt: text("expires_at"),
+  },
+  (t) => [
+    // A session never has two Confirm cards open: the database refuses the second.
+    uniqueIndex("intents_one_pending_per_session").on(t.sessionId).where(sql`${t.status} = 'awaiting_confirmation'`),
+  ],
+);
 
 export const choices = table("choices", {
   id: text("id").primaryKey(),

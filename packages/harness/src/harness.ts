@@ -7,6 +7,7 @@ import { parseUnits } from "viem";
 import { ACTIONS, swapIsland } from "./actions.js";
 import { audit } from "./audit.js";
 import type { HarnessCtx } from "./context.js";
+import { beginProposal, bumpGeneration, finishProposal, publishProposal } from "./coordination.js";
 import { buildReceipt, nextStepFor } from "./disclosure/receipt.js";
 import { EventBus, StepTracker } from "./events.js";
 import { paramsHash } from "./intents/hash.js";
@@ -43,7 +44,6 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
   const { repo, bus, db } = svc;
   const trackers = new Map<string, StepTracker>();
   const confirming = new Set<string>();
-  const preparations = new Map<string, symbol>();
 
   const assertActive = (ctx: HarnessCtx) => {
     if (ctx.signal?.aborted) throw new ArcieError("NOT_FOUND", { spoken: "That request was interrupted. Nothing new was submitted." });
@@ -67,18 +67,21 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
     // REST and model tools share these exact schemas, including their defaults.
     const parsed = tools.find((t) => t.name === `propose_${kind}`)?.args.safeParse(params);
     if (!parsed?.success) return { summary: "I didn't quite catch that. Could you check the action details?", data: { error: "INVALID_ARGS" } };
-    const generation = Symbol();
-    preparations.set(ctx.sessionId, generation);
+    const generation = await beginProposal(db, ctx.sessionId);
+    const replaced: ToolResult = { summary: "That preparation was cancelled or replaced.", data: { cancelled: true } };
     try {
       const w = await walletFor(svc, ctx);
       const prep = await ACTIONS[kind].prepare(svc, ctx, w, parsed.data as never);
       assertActive(ctx);
-      if (preparations.get(ctx.sessionId) !== generation) return { summary: "That preparation was cancelled or replaced.", data: { cancelled: true } };
       const now = ctx.now();
 
       if (prep.type === "choice") {
         const id = randomUUID();
-        await db.insert(choices).values({ id, sessionId: ctx.sessionId, question: prep.question, options: prep.options, createdAt: now.toISOString() });
+        const written = await publishProposal(db, ctx.sessionId, generation, async (tx) => {
+          await tx.insert(choices).values({ id, sessionId: ctx.sessionId, question: prep.question, options: prep.options, createdAt: now.toISOString() });
+          return true;
+        });
+        if (!written) return replaced;
         const island: IslandPayload = { kind: "choice", choiceId: id, question: prep.question, options: prep.options };
         bus.publish(ctx.sessionId, island);
         const names = prep.options.map((o) => o.label);
@@ -87,21 +90,34 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
 
       const base = { sessionId: ctx.sessionId, userId: ctx.userId, kind, chain: w.chain, usdValue: String(prep.usdValue), previewTurn: ctx.userTurn, now, ttlSec: TTL_SEC };
       if (prep.type === "rejected") {
-        const i = await repo.create({ ...base, params: prep.params, preview: {}, status: "rejected", statusReason: prep.reason });
-        await audit(db, ctx, "intent.rejected", { kind, code: prep.code, reason: prep.reason }, i.id);
-        return { summary: prep.reason, data: { error: prep.code, intentId: i.id } };
+        const rejected = await publishProposal(db, ctx.sessionId, generation, async (tx) => {
+          const i = await new IntentRepo(tx).create({ ...base, params: prep.params, preview: {}, status: "rejected", statusReason: prep.reason });
+          await audit(tx, ctx, "intent.rejected", { kind, code: prep.code, reason: prep.reason }, i.id);
+          return i;
+        });
+        if (!rejected) return replaced;
+        return { summary: prep.reason, data: { error: prep.code, intentId: rejected.id } };
       }
 
-      const intent = await repo.create({ ...base, params: { ...prep.params, requireScreen: prep.requireScreen }, preview: prep.preview, status: "awaiting_confirmation" });
-      for (const old of await repo.supersedeOpen(ctx.sessionId, intent.id)) dismiss(ctx, old, "superseded");
-      const island = prep.buildIsland(intent.id, intent.expiresAt!);
-      await repo.patch(intent.id, { preview: { ...prep.preview, island, estimated: prep.estimated } });
+      // Supersede the session's older card first: the database allows only one awaiting intent per session.
+      const published = await publishProposal(db, ctx.sessionId, generation, async (tx) => {
+        const txRepo = new IntentRepo(tx);
+        const id = randomUUID();
+        const superseded = await txRepo.supersedeOpen(ctx.sessionId, id);
+        const created = await txRepo.create({ ...base, id, params: { ...prep.params, requireScreen: prep.requireScreen }, preview: prep.preview, status: "awaiting_confirmation" });
+        const island = prep.buildIsland(created.id, created.expiresAt!);
+        await txRepo.patch(created.id, { preview: { ...prep.preview, island, estimated: prep.estimated } });
+        await audit(tx, ctx, "intent.proposed", { kind, params: prep.params, usdValue: prep.usdValue }, created.id);
+        return { intent: created, island, superseded };
+      });
+      if (!published) return replaced;
+      const { intent, island, superseded } = published;
+      for (const old of superseded) dismiss(ctx, old, "superseded");
       bus.publish(ctx.sessionId, island);
-      await audit(db, ctx, "intent.proposed", { kind, params: prep.params, usdValue: prep.usdValue }, intent.id);
       const summary = prep.requireScreen ? `${island.spokenPrompt} Because this is a new recipient, please tap confirm on the card.` : island.spokenPrompt;
       return { summary, data: { intentId: intent.id }, island };
     } finally {
-      if (preparations.get(ctx.sessionId) === generation) preparations.delete(ctx.sessionId);
+      await finishProposal(db, ctx.sessionId, generation);
     }
   }
 
@@ -263,7 +279,7 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
   async function cancel(ctx: HarnessCtx, intentId?: string): Promise<ToolResult> {
     const intent = intentId ? await repo.get(intentId) : await repo.latestAwaiting(ctx.sessionId);
     if (intentId && (!intent || intent.userId !== ctx.userId || intent.sessionId !== ctx.sessionId)) throw new ArcieError("NOT_FOUND");
-    const stopped = preparations.delete(ctx.sessionId);
+    const stopped = await bumpGeneration(db, ctx.sessionId);
     if (!intent || intent.userId !== ctx.userId || intent.status !== "awaiting_confirmation") {
       return { summary: stopped ? "Okay, I stopped preparing that. Nothing was moved." : "There's nothing to cancel.", data: { cancelled: stopped } };
     }

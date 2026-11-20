@@ -9,6 +9,8 @@ export type Intent = typeof intents.$inferSelect;
 type IntentPatch = Partial<Omit<Intent, "id" | "status" | "createdAt">>;
 
 export interface IntentDraft {
+  /** Lets the caller reference the id (e.g. as `supersededBy`) before the row exists. */
+  id?: string;
   sessionId: string;
   userId: string;
   kind: ActionKind;
@@ -31,7 +33,7 @@ export class IntentRepo {
     const [row] = await this.db
       .insert(intents)
       .values({
-        id: randomUUID(),
+        id: d.id ?? randomUUID(),
         sessionId: d.sessionId,
         userId: d.userId,
         kind: d.kind,
