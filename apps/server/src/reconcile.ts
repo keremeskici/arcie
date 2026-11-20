@@ -1,11 +1,12 @@
 import { getChain, getWallet, type AppKitPort } from "@arcie/appkit";
 import { ArcieError, tokenName } from "@arcie/core";
-import { audit, intents, type Db } from "@arcie/db";
+import { audit, confirmClaims, intents, type Db } from "@arcie/db";
 import { buildReceipt, IntentRepo, type EventLog, type Intent } from "@arcie/harness";
 import { and, asc, eq, isNull, lt, or, sql } from "drizzle-orm";
 
 const ORPHAN_AFTER_MS = 5 * 60_000;
-const CHECK_TIMEOUT_MS = 10_000;
+/** Strictly below the dedup window, so a check always ends before a second one can be claimed. */
+const CHECK_TIMEOUT_MS = 8_000;
 /** An intent checked within this window (database time) is not checked again, by any instance. */
 const CHECK_WINDOW = sql`interval '10 seconds'`;
 const DEFAULT_BUDGET_MS = 3_000;
@@ -32,13 +33,15 @@ export async function reconcileIntent(deps: ReconcileDeps, intentId: string, tim
       eq(intents.id, intentId),
       eq(intents.status, "executing"),
       or(isNull(intents.reconcileCheckedAt), lt(intents.reconcileCheckedAt, sql`now() - ${CHECK_WINDOW}`)),
+      // A live confirm owns settlement of this intent; recovery only starts once its claim has lapsed.
+      sql`not exists (select 1 from ${confirmClaims} where ${confirmClaims.intentId} = ${intents.id} and ${confirmClaims.expiresAt} > now())`,
     ))
     .returning({ id: intents.id });
   if (claimed.length === 0) return false;
 
   const i = await new IntentRepo(deps.db).get(intentId);
   if (!i || i.status !== "executing") return false;
-  return check(deps, i, timeoutMs);
+  return check(deps, i, Math.min(timeoutMs, CHECK_TIMEOUT_MS));
 }
 
 /**

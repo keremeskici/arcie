@@ -284,9 +284,11 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
         ...(nextStep ? { nextStep } : {}),
       });
       const settledPatch = { txHash: ex.tx.txHash, actuals: ex.actual, ...(done ? { preview: { ...intent.preview, receipt } } : {}) };
-      if (done) await transitionWithEvent(ctx.sessionId, intent.id, "executing", "succeeded", settledPatch, receipt);
-      else await repo.transition(intent.id, "executing", "executing", settledPatch);
-      await audit(db, ctx, done ? "intent.succeeded" : "intent.pending", { txHash: ex.tx.txHash, actual: ex.actual }, intent.id);
+      // A lost terminal transition means recovery already settled this intent; it wrote the audit row.
+      const won = done
+        ? await transitionWithEvent(ctx.sessionId, intent.id, "executing", "succeeded", settledPatch, receipt)
+        : await repo.transition(intent.id, "executing", "executing", settledPatch);
+      if (won || !done) await audit(db, ctx, done ? "intent.succeeded" : "intent.pending", { txHash: ex.tx.txHash, actual: ex.actual }, intent.id);
       return done
         ? { status: "succeeded", summary: ex.summary, island: receipt }
         : { status: "executing", summary: "It's processing; I'll show the receipt when it lands." };
@@ -299,8 +301,8 @@ export function createHarness(deps: { db: Db; kit: AppKitPort; policy: PolicyPro
         return { status: "executing", summary };
       }
       const receipt = buildReceipt({ intentId: intent.id, status: "failed", estimated, actual: {}, elapsedMs: elapsed(), error: err });
-      await transitionWithEvent(ctx.sessionId, intent.id, "executing", "failed", { error: { code: err.code, message: err.spoken }, preview: { ...intent.preview, receipt } }, receipt);
-      await audit(db, ctx, "intent.failed", { code: err.code, detail: String((err.detail as Error)?.message ?? "") }, intent.id);
+      const won = await transitionWithEvent(ctx.sessionId, intent.id, "executing", "failed", { error: { code: err.code, message: err.spoken }, preview: { ...intent.preview, receipt } }, receipt);
+      if (won) await audit(db, ctx, "intent.failed", { code: err.code, detail: String((err.detail as Error)?.message ?? "") }, intent.id);
       return { status: "failed", summary: err.spoken, island: receipt };
     }
   }

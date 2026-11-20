@@ -29,7 +29,7 @@ export function intentRoutes(deps: AppDeps) {
     let i = await deps.harness.intents.get(c.req.param("id"));
     if (!i || i.userId !== ctx.userId) throw new ArcieError("NOT_FOUND");
     // Only the owner reaches here. Settle an in-flight intent if it is due a check, then answer with current state.
-    if (i.status === "executing" && (await reconcileIntent(deps, i.id).catch((e) => { console.error(`Reconciling intent ${i!.id} failed:`, e); return false; }))) {
+    if (i.status === "executing" && (await reconcileIntent(deps, i.id, 3_000).catch((e) => { console.error(`Reconciling intent ${i!.id} failed:`, e); return false; }))) {
       i = (await deps.harness.intents.get(i.id)) ?? i;
     }
     return c.json({

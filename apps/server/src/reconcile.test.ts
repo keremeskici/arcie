@@ -1,4 +1,5 @@
-import { intents } from "@arcie/db";
+import { audit, confirmClaims, createDb, intents } from "@arcie/db";
+import { eq, sql } from "drizzle-orm";
 import { IntentRepo } from "@arcie/harness";
 import { describe, expect, it, vi } from "vitest";
 import { reconcileIntent, reconcileUser } from "./reconcile.js";
@@ -198,5 +199,83 @@ describe("on-demand reconciliation", () => {
     expect(status[pend.i.id]).toBe("executing");
     expect(status[sendTx.id]).toBe("succeeded");
     expect(status[orphan.id]).toBe("failed");
+  });
+});
+
+describe("reconciliation versus a live confirm (R19)", () => {
+  /** Holds the first waitForSwap open (the live confirm's) until release(); later calls resolve DONE immediately. */
+  function latchWait(t: Awaited<ReturnType<typeof testApp>>) {
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    let calls = 0;
+    t.kit.waitForSwap = async (_w, txHash) => {
+      if (++calls === 1) { entered(); await gate; }
+      return { txHash, status: "DONE" } as never;
+    };
+    return { started, release, calls: () => calls };
+  }
+  async function proposeSwap(t: Awaited<ReturnType<typeof testApp>>) {
+    const p = await (await t.call("POST", "/intents", { kind: "swap", params: { tokenIn: "USDC", tokenOut: "EURC", amountIn: "6" } })).json();
+    return p.island.intentId as string;
+  }
+
+  it("a read during a live confirm makes no network check; one terminal audit and the returned receipt is stored", async () => {
+    const t = await testApp();
+    const id = await proposeSwap(t);
+    t.kit.setPendingNext();
+    const gate = latchWait(t);
+    const confirming = t.call("POST", `/intents/${id}/confirm`);
+    await gate.started;
+
+    const mid = await (await t.call("GET", `/intents/${id}`)).json();
+    await t.call("GET", "/activity");
+    expect(mid.status).toBe("executing");
+    expect(gate.calls()).toBe(1); // only the live confirm's own wait
+    expect((await t.db.select().from(intents))[0]!.reconcileCheckedAt).toBeNull();
+
+    gate.release();
+    const returned = await (await confirming).json();
+    expect(returned.status).toBe("succeeded");
+    const terminal = (await t.db.select().from(audit)).filter((a) => a.intentId === id && a.type === "intent.succeeded");
+    expect(terminal).toHaveLength(1);
+    const stored = await (await t.call("GET", `/intents/${id}`)).json();
+    expect(stored.island).toEqual(JSON.parse(JSON.stringify(returned.island)));
+  });
+
+  it("the harness writes no terminal audit when its transition loses", async () => {
+    const t = await testApp();
+    const id = await proposeSwap(t);
+    t.kit.setPendingNext();
+    const gate = latchWait(t);
+    const confirming = t.call("POST", `/intents/${id}/confirm`);
+    await gate.started;
+    // Another instance settles it after the live claim lapsed.
+    await t.db.update(confirmClaims).set({ expiresAt: sql`now() - interval '1 second'` });
+    const other = createDb(t.url, { max: 2 });
+    try {
+      await other.db.update(intents).set({ status: "succeeded" }).where(eq(intents.id, id));
+    } finally {
+      await other.close();
+    }
+    gate.release();
+    await confirming;
+    const rows = (await t.db.select().from(audit)).filter((a) => a.intentId === id);
+    expect(rows.filter((a) => a.type === "intent.succeeded" || a.type === "intent.failed")).toHaveLength(0);
+  });
+
+  it("the route's check timeout is at most 3 s and every timeout stays under the 10 s dedup window", async () => {
+    const t = await testApp();
+    const { i } = await executingSwap(t);
+    const waits: number[] = [];
+    vi.spyOn(t.kit, "waitForSwap").mockImplementation(async (_w, h, timeoutMs) => { waits.push(timeoutMs); return { txHash: h, status: "PENDING" } as never; });
+    await t.call("GET", `/intents/${i.id}`);
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toBeLessThanOrEqual(3_000);
+    await t.db.update(intents).set({ reconcileCheckedAt: null });
+    await reconcileIntent({ db: t.db, kit: t.kit, events: t.events }, i.id, 60_000);
+    expect(waits).toHaveLength(2);
+    expect(waits.every((w) => w < 10_000)).toBe(true);
   });
 });
