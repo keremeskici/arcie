@@ -1,6 +1,6 @@
 import type { ActionKind, AgentLimits, ChainId, Channel } from "@arcie/core";
 import { sql } from "drizzle-orm";
-import { bigint, integer, jsonb, pgSchema, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { bigint, check, integer, jsonb, pgSchema, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 const now = () => new Date().toISOString();
 
@@ -17,6 +17,8 @@ export const users = table("users", {
   linkedWallet: text("linked_wallet").$type<`0x${string}`>(),
   /** Set when the testnet welcome drip was claimed (compare-and-set guards double drips). */
   welcomeDripAt: text("welcome_drip_at"),
+  /** Transaction hash of the welcome drip, stored on success. */
+  welcomeDripTx: text("welcome_drip_tx"),
   createdAt: text("created_at").notNull().$defaultFn(now),
 });
 
@@ -31,6 +33,22 @@ export const wallets = table(
     accountType: text("account_type").$type<"EOA" | "SCA">().notNull(),
   },
   (t) => [uniqueIndex("wallets_user_chain").on(t.userId, t.chain)],
+);
+
+/** One Circle creation attempt per (user, chain): every instance reuses the stored idempotency key. */
+export const walletProvisioning = table(
+  "wallet_provisioning",
+  {
+    userId: text("user_id").notNull(),
+    chain: text("chain").$type<ChainId>().notNull(),
+    idempotencyKey: uuid("idempotency_key").notNull(),
+    status: text("status").$type<"pending" | "created" | "uncertain">().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.chain] }),
+    check("wallet_provisioning_status", sql`${t.status} in ('pending','created','uncertain')`),
+  ],
 );
 
 export const contacts = table(

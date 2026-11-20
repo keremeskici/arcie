@@ -1,6 +1,6 @@
 import { ensureWallet, HOME_CHAIN, type WalletCreator, type WalletRef } from "@arcie/appkit";
 import { DEFAULT_LIMITS, type AgentLimits } from "@arcie/core";
-import { limits, users, type Db } from "@arcie/db";
+import { audit, limits, users, type Db } from "@arcie/db";
 import { and, eq, isNull } from "drizzle-orm";
 import { lockUserBudget } from "@arcie/harness";
 import type { Identity } from "./verifier.js";
@@ -47,9 +47,12 @@ export async function onboard(
     if (claimed) {
       try {
         dripTx = await deps.drip(wallet.address);
+        if (dripTx) await db.update(users).set({ welcomeDripTx: dripTx }).where(eq(users.id, id.userId));
       } catch (e) {
-        console.warn(`Welcome drip failed for ${id.userId}: ${(e as Error).message}`);
-        await db.update(users).set({ welcomeDripAt: null }).where(eq(users.id, id.userId));
+        // Never reset the claim: an ambiguous send may have landed, and a second automatic payment is worse.
+        const message = (e as Error).message;
+        console.warn(`Welcome drip uncertain for ${id.userId}: ${message}`);
+        await db.insert(audit).values({ userId: id.userId, type: "welcome_drip.uncertain", payload: { address: wallet.address, error: message } });
       }
     }
   }

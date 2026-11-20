@@ -26,11 +26,14 @@ export const fakeVerifier: TokenVerifier = {
 };
 
 function fakeCircle(): WalletCreator {
-  let n = 0;
+  const byKey = new Map<string, { id: string; address: string }>();
   return {
-    async createWallets() {
-      n++;
-      return { data: { wallets: [{ id: `cw-${n}`, address: `0x${n.toString(16).padStart(40, "a")}` }] } };
+    async createWallets(input) {
+      if (!byKey.has(input.idempotencyKey)) {
+        const n = byKey.size + 1;
+        byKey.set(input.idempotencyKey, { id: `cw-${n}`, address: `0x${n.toString(16).padStart(40, "a")}` });
+      }
+      return { data: { wallets: [byKey.get(input.idempotencyKey)!] } };
     },
   };
 }

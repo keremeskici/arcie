@@ -1,4 +1,5 @@
-import { seed, wallets } from "@arcie/db";
+import { seed, wallets, walletProvisioning } from "@arcie/db";
+import { createDb } from "@arcie/db";
 import { createTestDb } from "@arcie/db/testing";
 import { describe, expect, it } from "vitest";
 import { ensureWallet, type WalletCreator } from "./wallets.js";
@@ -31,14 +32,15 @@ describe("ensureWallet", () => {
     expect(await db.select().from(wallets)).toHaveLength(1);
   });
 
-  it("creates only one Circle wallet when two calls race", async () => {
+  it("replays one Circle creation when two calls race (same key on every call)", async () => {
     const { db } = await createTestDb();
     await seed(db, { userId: "demo" });
     const { creator, calls } = fakeCreator();
     const opts = { userId: "demo", chain: "Arc_Testnet" as const, walletSetId: "ws-1", accountType: "EOA" as const };
     const [a, b] = await Promise.all([ensureWallet(db, creator, opts), ensureWallet(db, creator, opts)]);
     expect(a).toEqual(b);
-    expect(calls).toHaveLength(1);
+    expect(new Set(calls.map((c) => (c as { idempotencyKey: string }).idempotencyKey)).size).toBe(1);
+    expect(await db.select().from(wallets)).toHaveLength(1);
   });
 
   it("fails clearly when Circle returns no wallet", async () => {
@@ -48,5 +50,65 @@ describe("ensureWallet", () => {
     await expect(
       ensureWallet(db, creator, { userId: "demo", chain: "Arc_Testnet", walletSetId: "ws-1", accountType: "EOA" }),
     ).rejects.toMatchObject({ code: "CIRCLE_API_ERROR" });
+  });
+});
+
+describe("wallet provisioning persistence", () => {
+  const opts = { userId: "demo", chain: "Arc_Testnet" as const, walletSetId: "ws-1", accountType: "EOA" as const };
+
+  it("retry after a Circle error reuses the same idempotency key", async () => {
+    const { db } = await createTestDb();
+    await seed(db, { userId: "demo" });
+    const keys: string[] = [];
+    let fail = true;
+    const creator: WalletCreator = {
+      async createWallets(input) {
+        keys.push(input.idempotencyKey);
+        if (fail) throw new Error("timeout");
+        return { data: { wallets: [{ id: "cw-1", address: "0x00000000000000000000000000000000000000c1" }] } };
+      },
+    };
+    await expect(ensureWallet(db, creator, opts)).rejects.toThrow("timeout");
+    const [uncertain] = await db.select().from(walletProvisioning);
+    expect(uncertain!.status).toBe("uncertain");
+    fail = false;
+    const ref = await ensureWallet(db, creator, opts);
+    expect(ref.circleWalletId).toBe("cw-1");
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/);
+    const [done] = await db.select().from(walletProvisioning);
+    expect(done).toMatchObject({ status: "created", idempotencyKey: keys[0] });
+  });
+
+  it("does not call Circle once the wallet is created", async () => {
+    const { db } = await createTestDb();
+    await seed(db, { userId: "demo" });
+    const { creator, calls } = fakeCreator();
+    await ensureWallet(db, creator, opts);
+    await ensureWallet(db, creator, opts);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("two instances racing share one stored key", async () => {
+    const { db, url } = await createTestDb();
+    const second = createDb(url, { max: 3 });
+    const db2 = second.db;
+    await seed(db, { userId: "demo" });
+    const keys: string[] = [];
+    const byKey = new Map<string, { id: string; address: string }>();
+    const creator: WalletCreator = {
+      async createWallets(input) {
+        keys.push(input.idempotencyKey);
+        await new Promise((r) => setTimeout(r, 30));
+        if (!byKey.has(input.idempotencyKey)) byKey.set(input.idempotencyKey, { id: `cw-${byKey.size + 1}`, address: `0x${(byKey.size + 1).toString(16).padStart(40, "c")}` });
+        return { data: { wallets: [byKey.get(input.idempotencyKey)!] } };
+      },
+    };
+    const [a, b] = await Promise.all([ensureWallet(db, creator, opts), ensureWallet(db2, creator, opts)]);
+    expect(a).toEqual(b);
+    expect(new Set(keys).size).toBe(1);
+    expect(await db.select().from(wallets)).toHaveLength(1);
+    await second.close();
   });
 });

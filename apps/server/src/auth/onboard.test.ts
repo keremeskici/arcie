@@ -1,20 +1,26 @@
 import type { WalletCreator } from "@arcie/appkit";
 import { DEFAULT_LIMITS } from "@arcie/core";
-import { limits, users, wallets } from "@arcie/db";
+import { audit, createDb, limits, users, wallets } from "@arcie/db";
 import { eq, sql } from "drizzle-orm";
 import { createTestDb } from "@arcie/db/testing";
 import { describe, expect, it } from "vitest";
 import { onboard } from "./onboard.js";
 
 function fakeCircle() {
-  let n = 0;
+  const byKey = new Map<string, { id: string; address: string }>();
+  const keys: string[] = [];
   const circle: WalletCreator = {
-    async createWallets() {
-      n++;
-      return { data: { wallets: [{ id: `cw-${n}`, address: `0x00000000000000000000000000000000000000c${n}` }] } };
+    async createWallets(input) {
+      keys.push(input.idempotencyKey);
+      await new Promise((r) => setTimeout(r, 20));
+      if (!byKey.has(input.idempotencyKey)) {
+        const n = byKey.size + 1;
+        byKey.set(input.idempotencyKey, { id: `cw-${n}`, address: `0x00000000000000000000000000000000000000c${n}` });
+      }
+      return { data: { wallets: [byKey.get(input.idempotencyKey)!] } };
     },
   };
-  return { circle, created: () => n };
+  return { circle, created: () => byKey.size, keys };
 }
 
 const KEREM = { userId: "did:privy:kerem", displayName: "Kerem", email: "k@x.io", linkedWallet: "0xBf879877e05430aC14fcEF6fE102DF29e264b114" as const };
@@ -46,19 +52,45 @@ describe("onboard", () => {
     expect(user).toMatchObject({ id: "did:privy:kerem", displayName: "Kerem", email: "k@x.io", linkedWallet: KEREM.linkedWallet, homeChain: "Arc_Testnet" });
   });
 
-  it("finishes onboarding when the drip fails, and retries the drip next time", async () => {
+  it("failed drip is not retried: the claim stays set and an audit row records it", async () => {
     const { db } = await createTestDb();
-    let fail = true;
+    let calls = 0;
     const drip = async () => {
-      if (fail) throw new Error("admin wallet empty");
-      return "0xlater";
+      calls++;
+      throw new Error("admin wallet empty");
     };
     const deps = { db, circle: fakeCircle().circle, walletSetId: "ws", drip };
     const first = await onboard(deps, KEREM);
     expect(first.dripTx).toBeNull();
-    expect(first.user.welcomeDripAt).toBeNull();
-    fail = false;
-    expect((await onboard(deps, KEREM)).dripTx).toBe("0xlater");
+    expect(first.user.welcomeDripAt).not.toBeNull();
+    expect((await onboard(deps, KEREM)).dripTx).toBeNull();
+    expect(calls).toBe(1);
+    const rows = await db.select().from(audit).where(eq(audit.type, "welcome_drip.uncertain"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.userId).toBe(KEREM.userId);
+  });
+
+  it("stores the drip transaction hash on success", async () => {
+    const { db } = await createTestDb();
+    const { user } = await onboard({ db, circle: fakeCircle().circle, walletSetId: "ws", drip: async () => "0xdrip" }, KEREM);
+    const [row] = await db.select().from(users).where(eq(users.id, KEREM.userId));
+    expect(row!.welcomeDripTx).toBe("0xdrip");
+    expect(user.welcomeDripAt).not.toBeNull();
+  });
+
+  it("concurrent onboarding on two pools makes one wallet and one key", async () => {
+    const { db, url } = await createTestDb();
+    const second = createDb(url, { max: 3 });
+    const { circle, keys } = fakeCircle();
+    const [a, b] = await Promise.all([
+      onboard({ db, circle, walletSetId: "ws" }, KEREM),
+      onboard({ db: second.db, circle, walletSetId: "ws" }, KEREM),
+    ]);
+    expect(a.wallet.address).toBe(b.wallet.address);
+    expect(await db.select().from(wallets)).toHaveLength(1);
+    expect(keys.length).toBeGreaterThanOrEqual(1);
+    expect(new Set(keys).size).toBe(1);
+    await second.close();
   });
 
   it("drips only once when two logins race", async () => {
