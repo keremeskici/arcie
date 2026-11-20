@@ -33,7 +33,7 @@ See `docs/architecture.md` for the diagrams.
 
 ```
 packages/core      shared types, money math (bigint, no floats), error codes, island payloads
-packages/db        SQLite + Drizzle schema, migrations, demo seed
+packages/db        Postgres + Drizzle schema, migrations, demo seed
 packages/appkit    Circle App Kit wrapper (send/swap/earn/onramp), chain registry, wallet provisioning
 packages/harness   tools, intents state machine, policy, disclosure (confirm/receipt), audit, events
 apps/server        Hono server: OpenAI-compatible /v1/chat/completions (ElevenLabs custom LLM), REST, SSE, Privy auth
@@ -43,14 +43,20 @@ docs/              architecture, ElevenLabs and Privy setup
 
 ## Run it
 
-Requirements: Node 22+, pnpm 9.
+Requirements: Node 24, pnpm 9, and a local Postgres database for the app.
 
 ```bash
 pnpm install
 cp .env.example .env
 ```
 
-Fill in `.env`: Circle API key, onramp key, OpenAI key, `OPENAI_MODEL=gpt-5.4-mini`, `OPENAI_REASONING_EFFORT=none`, and optionally `ARC_RPC_URL`. Then register a Circle entity secret (one time; it writes the secret to `.env` and the recovery file to `./recovery/`):
+Create an empty local Postgres database, configure `DATABASE_URL` and `DATABASE_MIGRATION_URL` in `.env`, and apply the schema from the repository root. Supply the Circle API key, onramp key, OpenAI key, `OPENAI_MODEL=gpt-5.4-mini`, `OPENAI_REASONING_EFFORT=none`, and optionally `ARC_RPC_URL`.
+
+```bash
+pnpm db:migrate
+```
+
+Then register a Circle entity secret (one time; it writes the secret to `.env` and the recovery file to `./recovery/`):
 
 ```bash
 pnpm --filter @arcie/server register-entity-secret
@@ -74,7 +80,7 @@ Talk to the agent from the terminal (in a second terminal):
 pnpm chat
 ```
 
-Checks:
+Run the checks from the repository root. Integration tests start an isolated embedded Postgres instance by default.
 
 ```bash
 pnpm test && pnpm typecheck
@@ -98,6 +104,6 @@ Onramp sandbox: open **Add Money → Open checkout**, or say **“I want to depo
 
 ## Status
 
-- **Backend complete:** all actions live on Arc Testnet (smoke test 15/15), evals 22/22, 206 tests. Verified by voice: balance, send, and a voice confirm with a real Arc transaction.
-- **Next:** Vercel + Supabase migration and deploy (`docs/deployment.md`), UI (Privy login, islands, ElevenLabs React SDK). See `.claude/NEXT.md`.
+- **Arc Testnet:** the original backend smoke run passed 15/15, evals passed 22/22, and the backend review covered 206 passing tests. Balance, send, and a voice confirmation were verified with a real Arc transaction.
+- **Vercel and Supabase branch:** 386 tests across 37 suites and both typechecks pass. See the [deployment runbook](docs/deployment.md) for hosted verification and cutover, and [NEXT.md](.claude/NEXT.md) for project history.
 - **Possible later feature:** ENS text-record agent limits.

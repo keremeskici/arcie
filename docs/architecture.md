@@ -1,13 +1,13 @@
 # Arcie architecture
 
-The full design is in `.claude/specs/2026-11-06-arcie-backend-design.md`.
+The [backend design](../.claude/specs/2026-11-06-arcie-backend-design.md) describes the product and payment flows. The [migration design](../.claude/specs/2026-11-07-vercel-supabase-design.md) describes hosted storage and coordination.
 
 ## Components
 
 ```mermaid
 flowchart LR
   user([User on phone])
-  subgraph Client["Mobile web app (UI phase)"]
+  subgraph Client["Mobile web app (Vite)"]
     ui[Balance and quick actions]
     islands[Islands: Steps · Choice · Confirm · Receipt]
     privyc[Privy login]
@@ -19,8 +19,9 @@ flowchart LR
     sse["/events (SSE islands)"]
     harness["packages/harness<br/>tools · intents · policy · disclosure · audit"]
     appkit["packages/appkit<br/>Circle App Kit wrapper"]
-    db[(SQLite)]
+    events["Durable session event log"]
   end
+  db[("Supabase Postgres<br/>private arcie schema")]
   openai[OpenAI gpt-5.4-mini]
   privy[Privy]
   circle[Circle dev-controlled wallets]
@@ -33,13 +34,18 @@ flowchart LR
   llm --> openai
   llm --> harness
   ui --> rest --> harness
-  harness --> sse --> islands
+  harness -->|append islands| events
+  sse -->|read snapshot and poll| events
+  sse -->|ordered islands| islands
+  events --> db
   privyc --> privy
   rest -->|verify token| privy
   harness --> appkit --> circle --> arc
-  harness --> db
+  harness -->|repository and coordination| db
   ui -. add money .-> onramp --> arc
 ```
+
+Vercel serves Vite and Hono from one origin. Postgres persists proposal generations, confirmation fences, spending reservations, wallet provisioning, and the session event log. The SSE endpoint reads a consistent snapshot, tails committed events, and resumes from the last event ID across instances. The browser connects to Arcie. The Hono runtime connects to the private schema with restricted credentials.
 
 ## The confirmation flow (why the AI can't move money by itself)
 
@@ -50,15 +56,20 @@ sequenceDiagram
   participant EL as ElevenLabs
   participant AG as Agent loop (OpenAI)
   participant H as Harness
+  participant D as Postgres
   participant K as App Kit / Circle
-  participant S as Screen (SSE)
+  participant E as Arcie SSE
+  participant S as Screen
 
   U->>EL: "Swap 10 dollars to euros"
   EL->>AG: custom-LLM request (user turn n)
   AG->>H: propose_swap(USDC→EURC, 10)
   H->>K: estimateSwap (quote, fees)
   H->>H: policy check (limits, balance, slippage)
-  H-->>S: Confirm island (amounts, fees, risks, button meanings)
+  H->>D: Commit intent and Confirm island
+  E->>D: Poll for committed session events
+  D-->>E: Confirm island
+  E-->>S: Confirm island
   H-->>AG: "Swap 10 USDC for about 9.2 EURC… Say confirm, or tap the card."
   AG-->>EL: spoken prompt
   alt user says "confirm" (turn n+1)
@@ -69,10 +80,15 @@ sequenceDiagram
     U->>S: tap Confirm
     S->>H: POST /intents/:id/confirm
   end
-  H->>H: new-turn rule · quote fresh? · compare-and-set (executes once)
+  H->>H: Check the new-turn rule and quote freshness
+  H->>D: Check confirmation fence and reserve budget under user lock
+  D-->>H: Commit execution claim
   H->>K: swap()
   K-->>H: tx hash, amount out
-  H-->>S: Receipt island (estimated vs actual, next step)
+  H->>D: Commit state and Receipt island
+  E->>D: Poll for committed session events
+  D-->>E: Receipt island
+  E-->>S: Receipt island
   H-->>AG: "Done. You got 9.2 EURC."
 ```
 
